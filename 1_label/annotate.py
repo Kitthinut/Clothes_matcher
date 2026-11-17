@@ -1,7 +1,8 @@
-"""GUI annotator: draw per-category boxes and label attributes. Saves annotations.json."""
+"""GUI annotator (1_label/annotate.py). Draw per-category boxes and save annotations."""
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -9,27 +10,41 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-import numpy as np
 from PIL import Image, ImageTk
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-# Also allow running from the same folder as attributes.py / analysis.py
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 1_label/ -> project root
+ROOT = Path(__file__).resolve().parents[1]
+LABEL_DIR = Path(__file__).resolve().parent
+for p in (ROOT, LABEL_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
-from analysis import analyze_crop
-from attributes import load_schema
+from shared.colors import detect_colors
+from shared.data import EXTS, SCHEMA_VERSION
+from shared.schema import load_full
 
-EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 NONE = "__none__"
 
 
+def parse_target_size(size_str):
+    """Parse width and height from '288x384', '288,384', or a single integer."""
+    if isinstance(size_str, (list, tuple)) and len(size_str) == 2:
+        return (int(size_str[0]), int(size_str[1]))
+    if isinstance(size_str, str):
+        size_str = size_str.lower().replace("x", ",").replace(" ", "")
+        if "," in size_str:
+            parts = size_str.split(",")
+            return (int(parts[0]), int(parts[1]))
+    val = int(size_str)
+    return (val, val)
+
+
 class Annotator:
-    def __init__(self, win, folder, ann_path):
+    def __init__(self, win, folder, ann_path, target_size=(288, 384), garment="top"):
         self.win, self.folder, self.ann_path = win, Path(folder), Path(ann_path)
-        self.schema = load_schema()
+        self.target_size = target_size  # (Width, Height), e.g. (288, 384)
+        self.garment = garment
+        self.schema = load_full(garment)
         self.files = sorted(
             p.relative_to(self.folder).as_posix()
             for p in self.folder.rglob("*")
@@ -41,20 +56,176 @@ class Annotator:
         self.data = (
             json.loads(self.ann_path.read_text(encoding="utf-8"))
             if self.ann_path.exists()
-            else {"images": {}}
+            else {}
         )
-        self.data["image_root"] = str(self.folder.resolve())
+        self.source_target_size = tuple(
+            self.data.get("target_size", target_size)
+        )
+        if self.data.get("garment", garment) != garment:
+            raise ValueError(
+                f"Annotations are for {self.data['garment']}, not {garment}."
+            )
+        self.data["schema_version"] = SCHEMA_VERSION
+        self.data.setdefault("garment", garment)
+        self.data.setdefault("images", {})
+        self.data["image_root"] = self.image_root_relative()
+        self.data["target_size"] = list(self.target_size)
         self.trash = self.folder.resolve().parent / "deleted_pictures"
         self.idx, self.start, self.cur_box, self.box_id = 0, None, None, None
         self.vars = {}
         self.category_frames = {}
+        self.upgrade_existing_images()
         self.build_ui()
         win.after(150, self.begin)
 
+    def image_root_relative(self):
+        return os.path.relpath(
+            self.folder.resolve(), self.ann_path.parent.resolve()
+        ).replace("\\", "/")
+
+    def scale_box(self, box, from_size, to_size):
+        if not box or len(box) != 4:
+            return None
+        from_w, from_h = from_size
+        to_w, to_h = to_size
+        if not from_w or not from_h:
+            return None
+        return [
+            round(box[0] * to_w / from_w),
+            round(box[1] * to_h / from_h),
+            round(box[2] * to_w / from_w),
+            round(box[3] * to_h / from_h),
+        ]
+
+    def upgrade_existing_images(self):
+        crop_keys = {
+            cat["key"] for cat in self.schema["categories"] if cat.get("crop_boxes")
+        }
+        for info in self.data["images"].values():
+            if info.get("regions"):
+                self.upgrade_region_list(info, crop_keys)
+                continue
+            regions = []
+            for garment in info.get("garments", []):
+                original_size = (
+                    info.get("width") or self.target_size[0],
+                    info.get("height") or self.target_size[1],
+                )
+                attrs = garment.get("attributes") or {}
+                base_attrs = {key: value for key, value in attrs.items() if key not in crop_keys}
+                if base_attrs or garment.get("box"):
+                    box = self.scale_box(
+                        garment.get("box") or [0, 0, *original_size],
+                        original_size,
+                        self.target_size,
+                    )
+                    region = {
+                        "category": "garment",
+                        "box": box or [0, 0, *self.target_size],
+                        "attributes": base_attrs,
+                    }
+                    if garment.get("colors"):
+                        region["shirt_colors"] = garment["colors"]
+                    regions.append(region)
+
+                crops = garment.get("attribute_crops") or {}
+                neck = crops.get("neck")
+                if attrs.get("neck") and neck:
+                    scaled = self.scale_box(neck, original_size, self.target_size)
+                    if scaled:
+                        regions.append({
+                            "category": "neck",
+                            "box": scaled,
+                            "attributes": {"neck": attrs["neck"]},
+                        })
+
+                sleeves = crops.get("sleeves")
+                if attrs.get("sleeves") and sleeves:
+                    if isinstance(sleeves, dict):
+                        sleeve_boxes = sleeves.items()
+                    else:
+                        sleeve_boxes = (("left", sleeves),)
+                    for side, box in sleeve_boxes:
+                        scaled = self.scale_box(box, original_size, self.target_size)
+                        if scaled:
+                            regions.append({
+                                "category": "sleeves",
+                                "side": side,
+                                "box": scaled,
+                                "attributes": {"sleeves": attrs["sleeves"]},
+                            })
+            if not regions and info.get("attributes"):
+                attrs = info["attributes"]
+                base_attrs = {key: value for key, value in attrs.items() if key not in crop_keys}
+                if base_attrs:
+                    regions.append({
+                        "category": "garment",
+                        "box": [0, 0, *self.target_size],
+                        "attributes": base_attrs,
+                    })
+            info.pop("garments", None)
+            info["regions"] = regions
+            info["target_size"] = list(self.target_size)
+
+    def upgrade_region_list(self, info, crop_keys):
+        stored_size = tuple(info.get("target_size", self.source_target_size))
+        converted, garment_region, sleeve_sides = [], None, set()
+        for region in info.get("regions", []):
+            attrs = region.get("attributes") or {}
+            category = region.get("category")
+            if category not in ("garment", "neck", "sleeves"):
+                category = next((key for key in crop_keys if key in attrs), "garment")
+
+            if category == "garment":
+                if garment_region is None:
+                    garment_region = {
+                        "category": "garment",
+                        "box": region.get("box"),
+                        "attributes": {},
+                    }
+                    converted.append(garment_region)
+                garment_region["attributes"].update(attrs)
+                for key in ("shirt_colors", "colors"):
+                    if region.get(key):
+                        garment_region["shirt_colors"] = region[key]
+                continue
+
+            new_region = dict(region)
+            new_region["category"] = category
+            new_region["attributes"] = attrs
+            if category == "sleeves":
+                side = region.get("side")
+                if side not in ("left", "right"):
+                    box = region.get("box")
+                    if isinstance(box, (list, tuple)) and len(box) == 4:
+                        side = (
+                            "left"
+                            if (box[0] + box[2]) / 2 < stored_size[0] / 2
+                            else "right"
+                        )
+                    else:
+                        side = next(
+                            (candidate for candidate in ("left", "right")
+                             if candidate not in sleeve_sides),
+                            "right",
+                        )
+                new_region["side"] = side
+                sleeve_sides.add(side)
+            converted.append(new_region)
+
+        if stored_size != self.target_size:
+            for region in converted:
+                region["box"] = self.scale_box(
+                    region.get("box"), stored_size, self.target_size
+                )
+        info.pop("garments", None)
+        info["regions"] = converted
+        info["target_size"] = list(self.target_size)
+
     def build_ui(self):
-        """Build canvas + right-side controls for categories, regions, and navigation."""
+        """Build canvas + right-side category / region / nav controls."""
         w = self.win
-        w.title("Garment Annotator - Enhanced Multi-Category View")
+        w.title(f"Garment Annotator — Target Res: {self.target_size[0]}x{self.target_size[1]}")
         w.geometry("1380x900")
         self.canvas = tk.Canvas(w, bg="#222", cursor="crosshair")
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -69,44 +240,46 @@ class Annotator:
         )
         self.title.pack(fill="x")
 
-        tk.Label(r, text="Category for this crop:", anchor="w").pack(fill="x", pady=(8, 0))
         categories = self.schema["categories"]
         self.category_by_key = {cat["key"]: cat for cat in categories}
-        self.category_key_by_title = {cat["title"]: cat["key"] for cat in categories}
-        self.category_var = tk.StringVar(value=categories[0]["title"])
+        self.base_categories = [
+            cat for cat in categories if not cat.get("crop_boxes")
+        ]
+        self.crop_categories = [
+            cat for cat in categories if cat.get("crop_boxes")
+        ]
+        self.category_key_by_title = {"Garment": "garment"}
+        self.category_key_by_title.update(
+            {cat["title"]: cat["key"] for cat in self.crop_categories}
+        )
+        self.category_var = tk.StringVar(value="Garment")
+        tk.Label(r, text="Category for this region:", anchor="w").pack(
+            fill="x", pady=(8, 0)
+        )
         self.category_picker = ttk.Combobox(
             r,
             state="readonly",
             textvariable=self.category_var,
-            values=[cat["title"] for cat in categories],
+            values=["Garment"] + [cat["title"] for cat in self.crop_categories],
         )
         self.category_picker.pack(fill="x")
         self.category_picker.bind("<<ComboboxSelected>>", self.on_category_change)
 
         self.category_container = tk.Frame(r)
         self.category_container.pack(fill="x")
-        for cat in categories:
-            lf = tk.LabelFrame(self.category_container, text=cat["title"], padx=4)
-            self.category_frames[cat["key"]] = lf
-            key, names = cat["key"], [o["name"] for o in cat["options"]]
-            if cat["mode"] == "single":
-                var = tk.StringVar(value="")
-                self.vars[key] = var
-                items = [(n, n) for n in names] + [("(skip)", "")]
-                for j, (txt, val) in enumerate(items):
-                    tk.Radiobutton(lf, text=txt, variable=var, value=val, anchor="w").grid(
-                        row=j // 3, column=j % 3, sticky="w", padx=4
-                    )
-            else:
-                d = {n: tk.BooleanVar() for n in names + [NONE]}
-                self.vars[key] = d
-                for j, n in enumerate(names + [NONE]):
-                    tk.Checkbutton(
-                        lf,
-                        text="(none of these)" if n == NONE else n,
-                        variable=d[n],
-                        anchor="w",
-                    ).grid(row=j // 3, column=j % 3, sticky="w", padx=4)
+        garment_frame = tk.LabelFrame(
+            self.category_container, text="Garment attributes", padx=4
+        )
+        self.category_frames["garment"] = garment_frame
+        for cat in self.base_categories:
+            self.add_category_controls(garment_frame, cat)
+        for cat in self.crop_categories:
+            frame = tk.LabelFrame(
+                self.category_container, text=cat["title"], padx=4
+            )
+            self.category_frames[cat["key"]] = frame
+            self.add_category_controls(frame, cat)
+
         self.on_category_change()
 
         row = tk.Frame(r)
@@ -157,7 +330,6 @@ class Annotator:
         tk.Button(row, text="Next >", command=lambda: self.goto(self.idx + 1)).pack(
             side="left", expand=True, fill="x"
         )
-
         tk.Button(
             r, text="Delete this picture... (Del)", command=self.delete_picture, fg="#b00020"
         ).pack(fill="x")
@@ -170,19 +342,48 @@ class Annotator:
         w.bind("<Control-s>", lambda e: self.save())
         w.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def add_category_controls(self, parent, cat):
+        frame = tk.LabelFrame(parent, text=cat["title"], padx=4)
+        frame.pack(fill="x", pady=1)
+        key, names = cat["key"], [option["name"] for option in cat["options"]]
+        if cat["mode"] == "single":
+            var = tk.StringVar(value="")
+            self.vars[key] = var
+            items = [(name, name) for name in names] + [("(skip)", "")]
+            for index, (text, value) in enumerate(items):
+                tk.Radiobutton(
+                    frame, text=text, variable=var, value=value, anchor="w"
+                ).grid(row=index // 3, column=index % 3, sticky="w", padx=4)
+            return
+
+        variables = {name: tk.BooleanVar() for name in names + [NONE]}
+        self.vars[key] = variables
+        for index, name in enumerate(names + [NONE]):
+            tk.Checkbutton(
+                frame,
+                text="(none of these)" if name == NONE else name,
+                variable=variables[name],
+                anchor="w",
+            ).grid(row=index // 3, column=index % 3, sticky="w", padx=4)
+
+    def on_category_change(self, _=None):
+        title = self.category_var.get()
+        key = self.category_key_by_title.get(title)
+        if key is None:
+            return
+        for frame in self.category_frames.values():
+            frame.pack_forget()
+        self.category_frames[key].pack(fill="x", pady=1)
     def typing(self):
-        """True when focus is in a text entry (so shortcuts don't fire)."""
         try:
             return isinstance(self.win.focus_get(), (tk.Entry, tk.Spinbox))
         except KeyError:
             return False
 
     def labelled(self, rel):
-        """Whether this relative path already has at least one region."""
         return bool(self.data["images"].get(rel, {}).get("regions"))
 
     def first_unlabelled(self, start=0):
-        """Index of the next image with no regions, wrapping around."""
         n = len(self.files)
         for k in range(n):
             i = (start + k) % n
@@ -191,12 +392,10 @@ class Annotator:
         return None
 
     def begin(self):
-        """Ask where to start, then show the first image."""
         self.idx = self.ask_start()
         self.show_image()
 
     def ask_start(self):
-        """Startup dialog: resume, after last, beginning, or jump to number."""
         n = len(self.files)
         done = [i for i, f in enumerate(self.files) if self.labelled(f)]
         first_un = self.first_unlabelled(0)
@@ -206,57 +405,27 @@ class Annotator:
         dlg.title("Where do you want to start?")
         dlg.transient(self.win)
         dlg.resizable(False, False)
-        dlg.geometry(f"+{self.win.winfo_x() + 250}+{self.win.winfo_y() + 180}")
-        tk.Label(
-            dlg,
-            padx=16,
-            pady=10,
-            font=("Arial", 10, "bold"),
-            text=(
-                f"{n} pictures in '{self.folder}'   |   "
-                f"{len(done)} labelled   |   {n - len(done)} left"
-            ),
-        ).pack()
-
         choice = tk.StringVar(
             value="resume" if (done and first_un is not None) else "begin"
         )
-        box = tk.Frame(dlg, padx=16)
-        box.pack(fill="x")
+        box = tk.Frame(dlg, padx=16, pady=10)
+        box.pack()
+        tk.Label(
+            box,
+            text=f"{n} pictures | {len(done)} labelled | {n - len(done)} left\nTarget Size: {self.target_size[0]}x{self.target_size[1]} (W x H)",
+            font=("Arial", 10, "bold"),
+        ).pack(anchor="w")
 
         def radio(text, val):
-            tk.Radiobutton(
-                box, text=text, variable=choice, value=val, anchor="w", justify="left"
-            ).pack(fill="x", pady=1)
-
-        if first_un is not None:
-            radio(
-                f"Continue at first unlabelled   (#{first_un + 1}: {self.files[first_un]})",
-                "resume",
-            )
-        else:
-            tk.Label(box, text="All pictures are labelled.", fg="#2e7d32", anchor="w").pack(
+            tk.Radiobutton(box, text=text, variable=choice, value=val, anchor="w").pack(
                 fill="x"
             )
+
+        if first_un is not None:
+            radio(f"First unlabelled (#{first_un + 1})", "resume")
         if done:
-            radio(
-                f"After last labelled   (#{after_last + 1}: {self.files[after_last]})",
-                "after",
-            )
-        radio("Start from beginning (#1)", "begin")
-
-        row = tk.Frame(box)
-        row.pack(fill="x", pady=1)
-        tk.Radiobutton(
-            row, text="Go to picture number:", variable=choice, value="num"
-        ).pack(side="left")
-        spin = tk.Spinbox(row, from_=1, to=n, width=7)
-        spin.delete(0, "end")
-        spin.insert(0, str((first_un if first_un is not None else 0) + 1))
-        spin.pack(side="left")
-        tk.Label(row, text=f" of {n}").pack(side="left")
-        spin.bind("<FocusIn>", lambda e: choice.set("num"))
-
+            radio(f"After last labelled (#{after_last + 1})", "after")
+        radio("Start from beginning", "begin")
         result = {"idx": 0}
 
         def go(_=None):
@@ -265,48 +434,35 @@ class Annotator:
                 i = first_un
             elif c == "after":
                 i = after_last
-            elif c == "num":
-                try:
-                    i = int(spin.get()) - 1
-                except ValueError:
-                    i = 0
             else:
                 i = 0
             result["idx"] = max(0, min(i, n - 1))
             dlg.destroy()
 
-        tk.Button(dlg, text="Start", command=go, width=16, bg="#cfe8cf").pack(pady=12)
+        tk.Button(dlg, text="Start", command=go, bg="#cfe8cf").pack(pady=8)
         dlg.protocol("WM_DELETE_WINDOW", go)
-        dlg.bind("<Return>", go)
         dlg.grab_set()
-        dlg.focus_set()
         self.win.wait_window(dlg)
         return result["idx"]
 
     def jump_unlabelled(self):
-        """Jump to the next image that still has no regions."""
         j = self.first_unlabelled(self.idx + 1)
         if j is None:
-            self.say("All pictures are labelled. Nice!")
-        elif j == self.idx:
-            self.say("This is the only unlabelled picture left.")
+            self.say("All pictures are labelled.")
         else:
             self.goto(j)
 
     def goto_number(self):
-        """Jump to the 1-based index typed in the Go-to box."""
         try:
             i = int(self.goto_entry.get()) - 1
         except ValueError:
-            return self.say(f"Type a picture number between 1 and {len(self.files)}.")
+            return self.say(f"Type 1..{len(self.files)}")
         self.goto(i)
         self.goto_entry.delete(0, "end")
-        self.win.focus_set()
 
     def delete_picture(self):
-        """Move current image out of the dataset and remove its labels."""
         rel = self.files[self.idx]
-        if not messagebox.askyesno("Delete picture", f"Remove {rel} from dataset?"):
+        if not messagebox.askyesno("Delete", f"Remove {rel}?"):
             return
         dst = self.trash / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -315,62 +471,92 @@ class Annotator:
         try:
             shutil.move(str(self.folder / rel), str(dst))
         except OSError as ex:
-            messagebox.showerror("Could not delete", str(ex))
+            messagebox.showerror("Error", str(ex))
             return
         self.data["images"].pop(rel, None)
         del self.files[self.idx]
         if not self.files:
             self.save()
-            messagebox.showinfo("No pictures left", "Dataset folder is empty. Closing.")
             self.win.destroy()
             return
         self.idx = min(self.idx, len(self.files) - 1)
         self.save()
         self.show_image()
-        self.say(f"Moved {rel} to {dst}")
 
     def get_attributes(self):
-        """Read the currently selected category's ticks into an attributes dict."""
-        k = self.category_key_by_title[self.category_var.get()]
-        cat, v = self.category_by_key[k], self.vars[k]
-        if cat["mode"] == "single":
-            return {k: v.get()} if v.get() else {}
-        ticked = [n for n, b in v.items() if n != NONE and b.get()]
-        if ticked:
-            return {k: ticked}
-        if v[NONE].get():
-            return {k: []}
-        return {}
+        region_category = self.category_key_by_title[self.category_var.get()]
+        keys = (
+            [cat["key"] for cat in self.base_categories]
+            if region_category == "garment"
+            else [region_category]
+        )
+        attrs = {}
+        for key in keys:
+            cat, variable = self.category_by_key[key], self.vars[key]
+            if cat["mode"] == "single":
+                if variable.get():
+                    attrs[key] = variable.get()
+                continue
+            ticked = [
+                name for name, value in variable.items()
+                if name != NONE and value.get()
+            ]
+            if ticked:
+                attrs[key] = ticked
+            elif variable[NONE].get():
+                attrs[key] = []
+        return attrs
 
-    def set_attributes(self, attrs):
-        """Push an attributes dict into the UI (used when selecting an existing region)."""
-        selected_key = next(
-            (cat["key"] for cat in self.schema["categories"] if cat["key"] in attrs),
+    def region_category(self, region):
+        category = region.get("category")
+        if category in self.category_frames:
+            return category
+        attrs = region.get("attributes", {})
+        for cat in self.crop_categories:
+            if cat["key"] in attrs:
+                return cat["key"]
+        return "garment"
+
+    def region_title(self, region):
+        category = self.region_category(region)
+        if category == "garment":
+            return "Garment"
+        if category == "sleeves":
+            return f"Sleeve {region.get('side', 'left')}"
+        return self.category_by_key[category]["title"]
+
+    def set_attributes(self, attrs, region=None):
+        selected_crop = next(
+            (cat["key"] for cat in self.crop_categories if cat["key"] in attrs),
             None,
         )
-        if selected_key:
-            self.category_var.set(self.category_by_key[selected_key]["title"])
-            self.on_category_change()
-        for cat in self.schema["categories"]:
-            k, v = cat["key"], self.vars[cat["key"]]
-            value = attrs.get(k) if k == selected_key else None
-            if cat["mode"] == "single":
-                v.set(value or "")
-            else:
-                for n, b in v.items():
-                    b.set(n in (value or []))
-                v[NONE].set(value == [])
+        region_category = (
+            self.region_category(region)
+            if region
+            else (
+                selected_crop
+                or self.category_key_by_title.get(self.category_var.get(), "garment")
+            )
+        )
+        title = (
+            self.category_by_key[region_category]["title"]
+            if region_category != "garment"
+            else "Garment"
+        )
+        self.category_var.set(title)
+        self.on_category_change()
 
-    def on_category_change(self, _=None):
-        """Show only the option panel for the category chosen in the dropdown."""
-        for frame in self.category_frames.values():
-            frame.pack_forget()
-        key = self.category_key_by_title.get(self.category_var.get())
-        if key:
-            self.category_frames[key].pack(fill="x", pady=2)
+        for cat in self.schema["categories"]:
+            key, variable = cat["key"], self.vars[cat["key"]]
+            value = attrs.get(key)
+            if cat["mode"] == "single":
+                variable.set(value if isinstance(value, str) else "")
+            else:
+                values = value if isinstance(value, list) else []
+                for name, checkbox in variable.items():
+                    checkbox.set(name in values if name != NONE else value == [])
 
     def short(self, attrs):
-        """One-line summary of a region's attributes for the listbox."""
         labels = []
         for key, value in attrs.items():
             if not value:
@@ -382,13 +568,23 @@ class Annotator:
         return " | ".join(labels) or "-"
 
     def entry(self):
-        """Annotation entry for the current image (creates it if missing)."""
         return self.data["images"].setdefault(self.files[self.idx], {"regions": []})
 
+    def sleeve_side_for_box(self, box):
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            raise ValueError(f"Expected a four-coordinate sleeve box, got {box!r}")
+        center_x = (box[0] + box[2]) / 2
+        return "left" if center_x < self.img.width / 2 else "right"
+
     def show_image(self):
-        """Load current image, scale to canvas, refresh region list and drawing."""
-        self.img = Image.open(self.folder / self.files[self.idx]).convert("RGB")
-        cw, ch = max(self.canvas.winfo_width(), 400), max(self.canvas.winfo_height(), 400)
+        """Loads and resizes image to specified target size first."""
+        raw_img = Image.open(self.folder / self.files[self.idx]).convert("RGB")
+        self.entry()["width"], self.entry()["height"] = raw_img.size
+        # Resize image to target resolution (Width, Height)
+        self.img = raw_img.resize(self.target_size, Image.Resampling.LANCZOS)
+        
+        cw = max(self.canvas.winfo_width(), 400)
+        ch = max(self.canvas.winfo_height(), 400)
         self.scale = min(cw / self.img.width, ch / self.img.height)
         self.photo = ImageTk.PhotoImage(
             self.img.resize(
@@ -400,57 +596,44 @@ class Annotator:
         self.redraw()
 
     def redraw(self, highlight=None):
-        """Draw image + all region boxes (length solid, other categories dashed)."""
         c = self.canvas
         c.delete("all")
         c.create_image(0, 0, anchor="nw", image=self.photo)
-
         for i, r in enumerate(self.entry()["regions"]):
             x0, y0, x1, y1 = [v * self.scale for v in r["box"]]
-            attrs = r["attributes"]
-            is_length_cat = "length" in attrs
-
-            if is_length_cat:
-                col = "#ff1744" if i == highlight else "#00e676"
-                dash = None
-            else:
-                col = "#ff9100" if i == highlight else "#00e5ff"
-                dash = (4, 4)
-
+            is_garment = self.region_category(r) == "garment"
+            col = (
+                ("#ff1744" if i == highlight else "#00e676")
+                if is_garment
+                else ("#ff9100" if i == highlight else "#00e5ff")
+            )
+            dash = None if is_garment else (4, 4)
             c.create_rectangle(x0, y0, x1, y1, outline=col, width=2, dash=dash)
             c.create_text(
-                x0 + 4,
-                y0 + 4,
-                anchor="nw",
-                fill=col,
-                font=("Arial", 10, "bold"),
-                text=f"{i + 1}: {self.short(attrs)}",
+                x0 + 4, y0 + 4, anchor="nw", fill=col, font=("Arial", 10, "bold"),
+                text=f"{self.region_title(r)}: {self.short(r['attributes'])}",
             )
         self.box_id = None
 
     def refresh_regions(self):
-        """Update title bar and region listbox for the current image."""
         e = self.entry()
         done = sum(1 for f in self.files if self.labelled(f))
         self.title.config(
             text=(
                 f"[{self.idx + 1}/{len(self.files)}] {self.files[self.idx]} "
-                f"({len(e['regions'])} regions)\n"
-                f"Labelled pictures: {done}/{len(self.files)}"
+                f"({self.target_size[0]}x{self.target_size[1]})\n"
+                f"({len(e['regions'])} regions) | Labelled: {done}/{len(self.files)}"
             )
         )
         self.rl.delete(0, "end")
         for i, r in enumerate(e["regions"]):
-            is_length = "length" in r["attributes"]
-            prefix = "[Length/Shirt]" if is_length else "[Category]"
+            prefix = f"[{self.region_title(r)}]"
             self.rl.insert("end", f"{i + 1}: {prefix} {self.short(r['attributes'])}")
 
     def on_press(self, e):
-        """Start drawing a crop box."""
         self.start, self.cur_box = (e.x, e.y), None
 
     def on_drag(self, e):
-        """Update the yellow rubber-band rectangle while dragging."""
         if not self.start:
             return
         if self.box_id:
@@ -460,7 +643,6 @@ class Annotator:
         )
 
     def on_release(self, e):
-        """Finish crop box; store absolute pixel coords on the original image."""
         if not self.start:
             return
         x0, x1 = sorted((self.start[0], e.x))
@@ -472,148 +654,181 @@ class Annotator:
             return
         W, H, s = self.img.width, self.img.height, self.scale
         cl = lambda v, m: max(0, min(int(v), m))
-        self.cur_box = [
-            cl(x0 / s, W),
-            cl(y0 / s, H),
-            cl(x1 / s, W),
-            cl(y1 / s, H),
-        ]
-        self.say(f"Crop box: {self.cur_box}\nPick attributes, then press Enter.")
+        self.cur_box = [cl(x0 / s, W), cl(y0 / s, H), cl(x1 / s, W), cl(y1 / s, H)]
+        side_note = ""
+        if self.category_key_by_title.get(self.category_var.get()) == "sleeves":
+            side = self.sleeve_side_for_box(self.cur_box)
+            side_note = f"\nDetected sleeve side from image position: {side}."
+        self.say(
+            f"Region box: {self.cur_box}{side_note}\n"
+            "Choose its type and labels, then press Enter."
+        )
 
     def run_analysis(self, box):
-        """Color analysis on a crop (used for length regions)."""
-        crop = np.array(self.img.crop(tuple(box)))[:, :, ::-1].copy()
-        return analyze_crop(crop)
+        return {"colors": detect_colors(self.img.crop(tuple(box)))}
 
     def add_region(self):
-        """Save current box + selected attributes as a new region."""
         attrs = self.get_attributes()
         if not attrs:
-            messagebox.showwarning(
-                "Nothing picked", "Pick a label for the selected category first."
-            )
+            messagebox.showwarning("Nothing picked", "Pick a label first.")
             return
-
+        category = self.category_key_by_title[self.category_var.get()]
+        if category != "garment" and self.cur_box is None:
+            return self.say("Draw this neck or sleeve box before adding the region.")
         box = self.cur_box or [0, 0, self.img.width, self.img.height]
-        shirt_colors = None
+        side = self.sleeve_side_for_box(box) if category == "sleeves" else None
+        existing_regions = self.entry()["regions"]
+        for region in existing_regions:
+            if self.region_category(region) != category:
+                continue
+            if category != "sleeves" or region.get("side", "left") == side:
+                return self.say(
+                    f"A {self.region_title({'category': category, 'side': side})} "
+                    "region already exists. Select it to update it."
+                )
 
+        shirt_colors = None
         if "length" in attrs:
-            self.win.config(cursor="watch")
-            self.win.update_idletasks()
             try:
-                analysis_res = self.run_analysis(box)
-                shirt_colors = analysis_res.get("colors", [])
+                shirt_colors = self.run_analysis(box).get("colors", [])
             except Exception as ex:
                 self.say(f"(Color analysis skipped: {ex})")
-            self.win.config(cursor="")
-
-        region_data = {"box": box, "attributes": attrs}
+        region_data = {"category": category, "box": box, "attributes": attrs}
+        if side:
+            region_data["side"] = side
         if shirt_colors:
             region_data["shirt_colors"] = shirt_colors
-
-        self.entry()["regions"].append(region_data)
+        existing_regions.append(region_data)
         self.cur_box = None
         if not self.keep.get():
             self.set_attributes({})
         self.refresh_regions()
         self.redraw()
         self.save()
-
         if shirt_colors:
             self.show_shirt_colors(shirt_colors)
 
     def sel_region(self):
-        """Index of the selected region in the listbox, or None."""
         s = self.rl.curselection()
         return s[0] if s else None
 
     def update_region(self):
-        """Overwrite attributes of the selected region with current ticks."""
         i = self.sel_region()
         if i is None:
-            return self.say("Select a region in the list first.")
+            return self.say("Select a region first.")
         attrs = self.get_attributes()
         if not attrs:
-            messagebox.showwarning(
-                "Nothing picked", "Pick a label for the selected category first."
-            )
+            messagebox.showwarning("Nothing picked", "Pick a label first.")
             return
-        self.entry()["regions"][i]["attributes"] = attrs
+        category = self.category_key_by_title[self.category_var.get()]
+        selected_region = self.entry()["regions"][i]
+        box = self.cur_box or selected_region["box"]
+        side = self.sleeve_side_for_box(box) if category == "sleeves" else None
+        for index, candidate in enumerate(self.entry()["regions"]):
+            if index == i or self.region_category(candidate) != category:
+                continue
+            if category != "sleeves" or candidate.get("side", "left") == side:
+                return self.say("A region of this type already exists.")
+
+        selected_region.update({"category": category, "attributes": attrs})
+        if self.cur_box is not None:
+            selected_region["box"] = self.cur_box
+            self.cur_box = None
+        if side:
+            selected_region["side"] = side
+        else:
+            selected_region.pop("side", None)
         self.refresh_regions()
         self.redraw(i)
         self.save()
 
     def delete_region(self):
-        """Remove the selected region from the current image."""
         i = self.sel_region()
         if i is None:
-            return self.say("Select a region in the list first.")
+            return self.say("Select a region first.")
         del self.entry()["regions"][i]
         self.refresh_regions()
         self.redraw()
         self.save()
 
     def on_region_select(self, _=None):
-        """Load selected region's labels into the UI and highlight its box."""
         i = self.sel_region()
         if i is None:
             return
         r = self.entry()["regions"][i]
-        self.set_attributes(r["attributes"])
+        self.set_attributes(r["attributes"], region=r)
         self.redraw(i)
         if r.get("shirt_colors"):
             self.show_shirt_colors(r["shirt_colors"])
 
     def show_shirt_colors(self, colors):
-        """Show dominant color names in the info panel."""
         cols = ", ".join(f"{c['name']} ({c['fraction']:.0%})" for c in colors)
         self.say(f"Shirt Color: {cols}")
 
     def analyze_current(self):
-        """Manual color preview; only allowed for the length category."""
-        attrs = self.get_attributes()
-        if "length" not in attrs:
-            return self.say("Color analysis is restricted to the 'Length' category.")
+        if self.category_key_by_title[self.category_var.get()] != "garment":
+            return self.say("Color analysis is available for garment regions.")
         box = self.cur_box or [0, 0, self.img.width, self.img.height]
         try:
-            an = self.run_analysis(box)
-            self.show_shirt_colors(an.get("colors", []))
+            self.show_shirt_colors(self.run_analysis(box).get("colors", []))
         except Exception as ex:
             self.say(f"Analysis failed: {ex}")
 
     def say(self, text):
-        """Write a short status message into the info text box."""
         self.info.delete("1.0", "end")
         self.info.insert("end", text)
 
     def goto(self, i):
-        """Save, clamp index, and show that image."""
         self.save()
         self.idx = max(0, min(i, len(self.files) - 1))
         self.show_image()
 
     def save(self):
-        """Write annotations.json (drops images that have zero regions)."""
+        self.data["schema_version"] = SCHEMA_VERSION
+        self.data["garment"] = self.garment
+        self.data["image_root"] = self.image_root_relative()
+        self.data["target_size"] = list(self.target_size)
         self.data["images"] = {
             k: v for k, v in self.data["images"].items() if v["regions"]
         }
+        self.ann_path.parent.mkdir(parents=True, exist_ok=True)
         self.ann_path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
 
     def on_close(self):
-        """Save and exit."""
         self.save()
         self.win.destroy()
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Label garment regions with per-category boxes")
-    ap.add_argument("folder", nargs="?", default=PROJECT_ROOT / "dataset")
-    ap.add_argument("--ann", default=None, help="Path to annotations.json")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("folder", nargs="?", default=None)
+    ap.add_argument("--garment", choices=("top", "bottom"), default="top")
+    ap.add_argument("--ann", default=None, help="annotations JSON path")
+    ap.add_argument(
+        "--size",
+        default="288x384",
+        help="Target size format '288x384' (Width x Height)",
+    )
     a = ap.parse_args()
-    folder = Path(a.folder)
-    ann = Path(a.ann) if a.ann else folder.parent / "annotations.json"
-    if a.ann is None and (folder / "annotations.json").exists():
+
+    folder = (
+        Path(a.folder)
+        if a.folder
+        else ROOT / "dataset" / a.garment / "images"
+    )
+    if not folder.exists() and not a.folder:
+        folder = ROOT / "dataset" / a.garment
+    target_size = parse_target_size(a.size)
+
+    if a.ann:
+        ann = Path(a.ann)
+    elif (folder / "annotations.json").exists():
         ann = folder / "annotations.json"
+    elif folder.name.lower() == "images" and (folder.parent / "annotations.json").exists():
+        ann = folder.parent / "annotations.json"
+    else:
+        ann = ROOT / "dataset" / a.garment / "annotations.json"
+
     root = tk.Tk()
-    Annotator(root, folder, ann)
+    Annotator(root, folder, ann, target_size=target_size, garment=a.garment)
     root.mainloop()
