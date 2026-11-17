@@ -1,0 +1,8 @@
+__pycache__/
+.venv*/
+*.pyc
+weights/*.pt
+weights/*.keras
+weights/*.csv
+database/*/index.json
+

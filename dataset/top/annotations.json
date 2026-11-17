@@ -1,0 +1,337 @@
+{
+  "schema_version": 3,
+  "garment": "top",
+  "image_root": "images",
+  "images": {
+    "kf_SHEIN_Tube_Tops_00003.jpg": {
+      "regions": [
+        {
+          "category": "garment",
+          "box": [
+            68,
+            13,
+            256,
+            279
+          ],
+          "attributes": {
+            "length": "cropped",
+            "type": "no button",
+            "pattern": []
+          },
+          "shirt_colors": [
+            {
+              "name": "brown",
+              "hsv": [
+                22,
+                0.54,
+                0.4
+              ],
+              "hex": "#65412f",
+              "fraction": 0.999
+            }
+          ]
+        },
+        {
+          "category": "neck",
+          "box": [
+            93,
+            6,
+            286,
+            106
+          ],
+          "attributes": {
+            "neck": "off shoulder"
+          }
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            32,
+            20,
+            122,
+            203
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "left"
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            247,
+            21,
+            287,
+            221
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "right"
+        }
+      ],
+      "width": 288,
+      "height": 384,
+      "target_size": [
+        288,
+        384
+      ]
+    },
+    "kf_SHEIN_Tube_Tops_00009.jpg": {
+      "regions": [
+        {
+          "category": "sleeves",
+          "box": [
+            64,
+            110,
+            127,
+            248
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "left"
+        },
+        {
+          "category": "neck",
+          "box": [
+            105,
+            91,
+            269,
+            176
+          ],
+          "attributes": {
+            "neck": "off shoulder"
+          }
+        },
+        {
+          "category": "garment",
+          "box": [
+            102,
+            108,
+            258,
+            311
+          ],
+          "attributes": {
+            "length": "cropped",
+            "type": "no button",
+            "pattern": [
+              "stripe"
+            ]
+          },
+          "shirt_colors": [
+            {
+              "name": "orange",
+              "hsv": [
+                19,
+                0.4,
+                0.55
+              ],
+              "hex": "#8d6655",
+              "fraction": 0.601
+            },
+            {
+              "name": "pink",
+              "hsv": [
+                322,
+                0.37,
+                0.23
+              ],
+              "hex": "#3b2533",
+              "fraction": 0.253
+            },
+            {
+              "name": "gray",
+              "hsv": [
+                108,
+                0.09,
+                0.75
+              ],
+              "hex": "#b2bfaf",
+              "fraction": 0.147
+            }
+          ]
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            240,
+            90,
+            287,
+            249
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "right"
+        }
+      ],
+      "width": 288,
+      "height": 384,
+      "target_size": [
+        288,
+        384
+      ]
+    },
+    "kf_SHEIN_Tube_Tops_00013.jpg": {
+      "regions": [
+        {
+          "category": "sleeves",
+          "box": [
+            212,
+            76,
+            288,
+            276
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "right"
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            4,
+            74,
+            80,
+            276
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "left"
+        },
+        {
+          "category": "neck",
+          "box": [
+            40,
+            43,
+            248,
+            112
+          ],
+          "attributes": {
+            "neck": "off shoulder"
+          }
+        },
+        {
+          "category": "garment",
+          "box": [
+            39,
+            79,
+            252,
+            285
+          ],
+          "attributes": {
+            "length": "cropped",
+            "type": "no button",
+            "pattern": [
+              "graphic"
+            ]
+          },
+          "shirt_colors": [
+            {
+              "name": "yellow",
+              "hsv": [
+                50,
+                0.34,
+                0.82
+              ],
+              "hex": "#d0c489",
+              "fraction": 0.554
+            },
+            {
+              "name": "orange",
+              "hsv": [
+                23,
+                0.49,
+                0.81
+              ],
+              "hex": "#cf8f6a",
+              "fraction": 0.427
+            }
+          ]
+        }
+      ],
+      "width": 288,
+      "height": 384,
+      "target_size": [
+        288,
+        384
+      ]
+    },
+    "kf_SHEIN_Tube_Tops_00023.jpg": {
+      "regions": [
+        {
+          "category": "garment",
+          "box": [
+            27,
+            94,
+            261,
+            287
+          ],
+          "attributes": {
+            "length": "cropped",
+            "type": "no button",
+            "pattern": []
+          },
+          "shirt_colors": [
+            {
+              "name": "black",
+              "hsv": [
+                1,
+                0.01,
+                0.09
+              ],
+              "hex": "#171717",
+              "fraction": 1.0
+            }
+          ]
+        },
+        {
+          "category": "neck",
+          "box": [
+            33,
+            73,
+            260,
+            134
+          ],
+          "attributes": {
+            "neck": "off shoulder"
+          }
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            229,
+            91,
+            275,
+            293
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "right"
+        },
+        {
+          "category": "sleeves",
+          "box": [
+            11,
+            100,
+            62,
+            287
+          ],
+          "attributes": {
+            "sleeves": "sleeveless"
+          },
+          "side": "left"
+        }
+      ],
+      "width": 288,
+      "height": 384
+    }
+  },
+  "target_size": [
+    288,
+    384
+  ]
+}

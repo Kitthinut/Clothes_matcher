@@ -1,0 +1,10 @@
+# Both backends share this list. TF and PyTorch in one venv usually works,
+# but if pip complains, make a second venv (e.g. .venv-tf) with tensorflow only.
+torch
+torchvision
+pillow
+numpy
+opencv-python
+# TF note (Windows): native Windows wheels stop at 2.10.
+# On Windows use:  pip install tensorflow==2.10.*
+# On Linux/macOS/WSL2 use the latest:  pip install tensorflow
