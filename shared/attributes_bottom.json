@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "garment": "bottom",
+  "categories": [
+    {"key": "waist_length", "title": "Waist length", "mode": "single", "options": [
+      {"name": "low-rise", "aliases": ["low", "low rise", "hiphugger"]},
+      {"name": "high-rise", "aliases": ["high", "high waist", "high waisted"]}
+    ]},
+    {"key": "bottom_length", "title": "Length", "mode": "single", "options": [
+      {"name": "cropped", "aliases": ["ankle", "crop"]},
+      {"name": "full-length", "aliases": ["long", "full", "floor length"]},
+      {"name": "shorts", "aliases": ["short", "short pant"]}
+    ]},
+    {"key": "pattern", "title": "Pattern", "mode": "multi", "options": [
+      {"name": "dotted", "aliases": ["dot", "dots", "polka dot", "polka"]},
+      {"name": "striped", "aliases": ["stripe", "stripes", "line"]},
+      {"name": "checked", "aliases": ["check", "plaid", "gingham", "tartan"]},
+      {"name": "plain", "aliases": ["plain", "solid"]},
+      {"name": "graphic", "aliases": ["print", "logo", "text", "picture"]}
+    ]},
+    {"key": "fit_type", "title": "Fit type", "mode": "single", "options": [
+      {"name": "skinny", "aliases": ["tight", "slim", "legging"]},
+      {"name": "straight", "aliases": ["regular fit", "straight leg"]},
+      {"name": "baggy", "aliases": ["wide", "palazzo", "culotte"]},
+      {"name": "bootcut", "aliases": ["flare", "bell bottom", "flared"]}
+    ]}
+  ]
+}
