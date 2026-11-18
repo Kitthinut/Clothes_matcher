@@ -120,7 +120,7 @@ Helpful keys: `T`/`B` garment · `Tab` next chip · `1`–`9` label or chip ·
 You will have:
 
 - **Your original pictures** — unchanged, in the images folder.
-- **One `.json` file per labelled picture** in the `annotations` folder.
+- **One `annotations.json` file** with all your labelled pictures in it.
 
 ### Send me back (zip these together)
 
@@ -129,14 +129,12 @@ You will have:
 ├─ images\                      ← all your pictures
 │   ├─ IMG_0001.jpg
 │   └─ ...
-├─ annotations\                 ← the labels the app created
-│   ├─ IMG_0001.json
-│   └─ ...
-└─ README.txt                   ← your name, date, any notes
+├─ annotations.json              ← ONE file with all your boxes
+└─ README.txt                    ← your name, date, any notes
 ```
 
-There is **no `.txt` file** to send — the JSON is the only label file, and I
-generate the YOLO training files myself.
+There is **no `.txt` file** to send — `annotations.json` is the only label file,
+and I generate the YOLO training files myself.
 
 The `README.txt` can be a plain text file like:
 
@@ -147,7 +145,7 @@ Notes: picture 7 has two tops; I boxed both. Some images are 640x480, others 500
 ```
 
 **Checklist before zipping:**
-- [ ] Every labelled picture has a matching `.json` with the same name.
+- [ ] Every labelled picture appears by name inside `annotations.json`.
 - [ ] Each garment you labelled has its region boxes (both sleeve arms).
 - [ ] You didn't rename pictures after labelling.
 - [ ] `README.txt` has your name, the date and any size/quality notes.

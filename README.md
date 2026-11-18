@@ -68,7 +68,7 @@ test. Regenerate at any time:
 python -c "from common.mock_data import ensure_mock_dataset; ensure_mock_dataset(force=True)"
 ```
 
-This writes `sample_data/images/*.jpg`, `sample_data/annotations/*.json` + `*.txt`
+This writes `sample_data/images/*.jpg`, one `sample_data/annotations/annotations.json`
 and `sample_data/catalog/products.json` (+ product images).
 
 ### Where to put your own data
@@ -76,7 +76,7 @@ and `sample_data/catalog/products.json` (+ product images).
 | Folder | What goes there | Written by |
 |---|---|---|
 | `sample_data/images/` | **Your own photos to label** (`.jpg`, `.png`, `.webp`) — replace or add to the synthetic samples | You |
-| `sample_data/annotations/` | `<stem>.json` (boxes + attributes, the source of truth), `<stem>.txt` (YOLO label), `_session.json` (resume state) | The annotator |
+| `sample_data/annotations/` | `annotations.json` (all boxes + attributes — the source of truth), `_session.json` (resume state) | The annotator |
 | `sample_data/catalog/` | Product images + `products.json` used by the search database | You |
 | `datasets/detect/` | Generated `data.yaml`, `images/{train,val}`, `labels/{train,val}` | `annotator.export` — never edit by hand |
 | `datasets/cls/` | Generated per-attribute crops `train/<class>/*.jpg` | `annotator.export` — never edit by hand |
@@ -145,10 +145,13 @@ box and its own YOLO class (`top_neck_crew`, `top_sleeves_left_long`,
   stored separately, including their HSV values.
 - An image can contain **only a top, only a bottom, or both**. Tick **top absent**
   / **bottom absent** to grey out that garment's chips.
-- **Only JSON is saved per image** (`sample_data/annotations/<stem>.json`, or
-  `--annotations`): region boxes (`garment`, `region`, `side`, `label`, `xyxy`,
-  optional `hsv`) and `absent_garments`. No per-image `.txt` is written;
-  `annotator.export` derives the YOLO `datasets/detect/labels/*.txt` from JSON.
+- **All annotations live in ONE file**: `sample_data/annotations/annotations.json`
+  (or `--annotations`). It maps each image name to its size, region boxes
+  (`garment`, `region`, `side`, `label`, `xyxy`, optional `hsv`) and
+  `absent_garments`. No per-image `.json` or `.txt` files are written;
+  `annotator.export` derives the YOLO `datasets/detect/labels/*.txt` from it.
+  If old per-image `*.json` files exist, they are merged into `annotations.json`
+  on first launch and kept as `*.json.bak`.
 - When the app opens it checks every image and shows a pop-up reporting whether
   they are all the same size and large enough (>= 224 px per side). If sizes
   differ, it asks whether to resize **all** images to one target size (default

@@ -49,6 +49,7 @@ def test_resize_preserves_aspect_with_padding_and_scales_boxes(tmp_path) -> None
     with Image.open(tmp_path / "backup" / "a.jpg") as img:
         assert img.size == (200, 100)  # original preserved
 
+    store = AnnotationStore(images, annotations, load_schema())  # reload combined file
     saved = store.load(images / "a.jpg")
     assert (saved.width, saved.height) == (384, 288)
     assert saved.boxes[0].xyxy == (38, 67, 192, 144)

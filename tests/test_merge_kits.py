@@ -78,7 +78,7 @@ def test_kit_problems_and_conflicts(temp_config: Config, tmp_path) -> None:
     assert "mock_0000.jpg" in skipped["skipped"]
 
     forced = merge_kit(kit, temp_config, images_dir=dest_images, annotations_dir=dest_ann, force=True)
-    assert "mock_0000.jpg" in forced["conflicts"]
+    assert forced["copied_labels"] == 1
     merged_data = json.loads((dest_ann / DATA_FILENAME).read_text(encoding="utf-8"))
     assert merged_data["images"]["mock_0000.jpg"]["note"] == "friend changed this"
 
