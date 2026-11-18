@@ -98,24 +98,15 @@ def test_custom_dirs_for_validate_and_export(temp_config: Config, tmp_path) -> N
     assert summary["images_train"] + summary["images_val"] == 2
 
 
-def test_custom_dirs_for_ui_construction(temp_config: Config, tmp_path) -> None:
+def test_custom_dirs_for_ui_construction(temp_config: Config, tmp_path, tk_root) -> None:
     kit = _make_kit(temp_config, tmp_path, n=1)
-    images, annotations = kit / "images", kit / "annotations"
+    images, annotations = kit / "images", kit
 
     from annotator.app_web import make_app
 
     assert make_app(config=temp_config, image_dir=images, annotations_dir=annotations) is not None
 
-    tkinter = __import__("tkinter")
-    try:
-        root = tkinter.Tk()
-        root.withdraw()
-    except tkinter.TclError:
-        return
-    try:
-        from annotator.app import DesktopAnnotator
+    from annotator.app import DesktopAnnotator
 
-        app = DesktopAnnotator(root, config=temp_config, image_dir=images, annotations_dir=annotations)
-        assert app.current_path().parent.resolve() == images.resolve()
-    finally:
-        root.destroy()
+    app = DesktopAnnotator(tk_root, config=temp_config, image_dir=images, annotations_dir=annotations)
+    assert app.current_path().parent.resolve() == images.resolve()

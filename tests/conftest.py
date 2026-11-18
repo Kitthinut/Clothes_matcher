@@ -9,6 +9,19 @@ import pytest
 from common.config import Config
 
 
+@pytest.fixture(scope="session")
+def tk_root():
+    """One hidden Tk root shared by GUI tests (Tk dislikes repeated roots)."""
+    tkinter = pytest.importorskip("tkinter")
+    try:
+        root = tkinter.Tk()
+        root.withdraw()
+    except tkinter.TclError:
+        pytest.skip("No display available for tkinter")
+    yield root
+    root.destroy()
+
+
 @pytest.fixture
 def temp_config(tmp_path: Path) -> Config:
     """Return a Config whose every path lives in the test's tmp directory."""

@@ -10,7 +10,8 @@
 # list, datasets, classifiers, DB filters and tests are all generated from it.
 version: 2
 
-# HSV colour names used by common/colors.py (auto-detected, editable in the UI).
+# HSV colour names used by common/colors.py (auto-detected; up to three colours
+# per Colour box can be stored, for striped / mixed garments).
 color_classes: [black, white, gray, red, orange, brown, yellow, green, teal, blue, navy, purple, pink]
 
 garments:

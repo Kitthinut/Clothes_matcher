@@ -36,13 +36,8 @@ def _sample_image(path: Path) -> None:
     image.save(path)
 
 
-def test_drawing_and_automatic_colour(temp_config: Config) -> None:
-    tkinter = pytest.importorskip("tkinter")
-    try:
-        root = tkinter.Tk()
-        root.withdraw()
-    except tkinter.TclError:
-        pytest.skip("No display available for tkinter")
+def test_drawing_and_automatic_colour(temp_config: Config, tk_root) -> None:
+    root = tk_root
     try:
         images = temp_config.path("paths.images_raw")
         images.mkdir(parents=True, exist_ok=True)
@@ -86,13 +81,13 @@ def test_drawing_and_automatic_colour(temp_config: Config) -> None:
         top = next(b for b in app.boxes() if b.garment == "top" and b.region == "color")
         assert top.label == "white"
         assert top.hsv is not None and 0 <= top.hsv[0] <= 360
-        assert app.color_info[top.id].friendly in {"white", "cream"}
+        assert app.color_info[top.id][0].friendly in {"white", "cream"}
 
         app.set_garment("bottom")
         app.set_category("bottom_color_center")
         _drag(app, (120, 380), (220, 500))
         bottom = next(b for b in app.boxes() if b.garment == "bottom" and b.region == "color")
         assert bottom.label == "black"
-        assert app.color_info[bottom.id].friendly == "black"
+        assert app.color_info[bottom.id][0].friendly == "black"
     finally:
-        root.destroy()
+        pass  # the shared root is destroyed by the session fixture

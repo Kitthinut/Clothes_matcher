@@ -97,9 +97,10 @@ first; click OK to start. You can re-open it any time with **Check sizes**.
 2. **Drag on the picture** to draw a box for that attribute. Each attribute gets
    its own box (multi-class object detection).
 3. For **Colour**, draw a box over a clean patch of the garment (for example the
-   plain part of a sleeve or trouser leg). The colour is detected automatically
-   from the pixels inside that box; a swatch shows the result. You cannot pick
-   the colour by hand — just redraw or resize the Colour box if it is wrong.
+   plain part of a sleeve or trouser leg). The colours are detected automatically
+   from the pixels inside that box — a striped or multi-colour garment can show
+   two or three swatches with percentages. You cannot pick colours by hand —
+   just redraw or resize the Colour box if the result is wrong.
 4. **Sleeves need two boxes** — `Sleeves L` is the left arm and `Sleeves R` is
    the right arm.
 5. Click a box to select it; drag corner handles to resize or drag inside to

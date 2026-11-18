@@ -138,17 +138,21 @@ box and its own YOLO class (`top_neck_crew`, `top_sleeves_left_long`,
   used until you choose; if no box is selected, `1–9` moves between chips.
 - **Sleeves use two boxes:** left arm and right arm are separate regions/classes
   (`top_sleeves_left_long`, `top_sleeves_right_long`).
-- **Colour is fully automatic:** draw a *Colour* box over a representative patch
-  of the garment. HSV + k-means names the dominant colour (shadows/highlights
-  and skin/background are downweighted; red wraps around 0/360). A read-only
-  swatch with the hex, HSV values and friendly name updates live as you move or
-  resize that box. There is no manual colour picker. Top and bottom colours are
-  stored separately, including their HSV values.
+- **Colour is fully automatic and supports multiple colours:** draw a *Colour*
+  box over a representative patch of the garment. HSV + k-means finds up to
+  three significant colours with their pixel shares (so striped / multi-colour
+  garments show both colours; shadows/highlights and skin/background are
+  downweighted and red wraps around 0/360). Read-only swatches with hex, HSV,
+  friendly name and percentage update live as you move or resize the box.
+  There is no manual colour picker. Top and bottom colours are stored
+  separately, including all detected colours and their HSV values. The first
+  colour remains the single YOLO training label (`top_color_<name>`); the full
+  ranked list is stored in the box's `colors` field and used by search.
 - An image can contain **only a top, only a bottom, or both**. Tick **top absent**
   / **bottom absent** to grey out that garment's chips.
 - **All annotations live in ONE file**: `sample_data/annotations/annotations.json`
   (or `--annotations`). It maps each image name to its size, region boxes
-  (`garment`, `region`, `side`, `label`, `xyxy`, optional `hsv`) and
+  (`garment`, `region`, `side`, `label`, `xyxy`, optional `hsv` and `colors`) and
   `absent_garments`. No per-image `.json` or `.txt` files are written;
   `annotator.export` derives the YOLO `datasets/detect/labels/*.txt` from it.
   If old per-image `*.json` files exist, they are merged into `annotations.json`

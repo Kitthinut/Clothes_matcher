@@ -50,7 +50,8 @@ class Box:
     label: str
     xyxy: tuple[int, int, int, int]
     hidden: bool = False
-    hsv: tuple[float, float, float] | None = None  # automatic colour boxes only
+    hsv: tuple[float, float, float] | None = None  # primary colour (legacy field)
+    colors: list[dict[str, Any]] | None = None     # all detected colours, ranked
 
     @classmethod
     def create(
@@ -62,6 +63,7 @@ class Box:
         xyxy: Iterable[int],
         *,
         hsv: tuple[float, float, float] | None = None,
+        colors: list[dict[str, Any]] | None = None,
     ) -> "Box":
         x1, y1, x2, y2 = (int(round(float(v))) for v in xyxy)
         return cls(
@@ -69,6 +71,7 @@ class Box:
             side=side, label=label,
             xyxy=(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)),
             hsv=hsv,
+            colors=colors,
         )
 
     @classmethod
@@ -82,6 +85,7 @@ class Box:
             xyxy=tuple(int(v) for v in data["xyxy"]),  # type: ignore[arg-type]
             hidden=bool(data.get("hidden", False)),
             hsv=tuple(float(v) for v in data["hsv"]) if data.get("hsv") else None,  # type: ignore[assignment]
+            colors=[dict(c) for c in data["colors"]] if data.get("colors") else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +96,8 @@ class Box:
         }
         if self.hsv is not None:
             result["hsv"] = [round(float(v), 4) for v in self.hsv]
+        if self.colors is not None:
+            result["colors"] = self.colors
         return result
 
     def detection_name(self, schema: Schema) -> str:

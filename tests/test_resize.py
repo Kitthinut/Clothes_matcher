@@ -59,13 +59,8 @@ def test_resize_preserves_aspect_with_padding_and_scales_boxes(tmp_path) -> None
     assert not (tmp_path / "backup" / "a_resized").exists()
 
 
-def test_app_asks_and_resizes(temp_config: Config, monkeypatch) -> None:
-    tkinter = pytest.importorskip("tkinter")
-    try:
-        root = tkinter.Tk()
-        root.withdraw()
-    except tkinter.TclError:
-        pytest.skip("No display available for tkinter")
+def test_app_asks_and_resizes(temp_config: Config, monkeypatch, tk_root) -> None:
+    root = tk_root
     try:
         from annotator import app as app_module
         from annotator.app import DesktopAnnotator
@@ -99,4 +94,4 @@ def test_app_asks_and_resizes(temp_config: Config, monkeypatch) -> None:
         assert app.image_report.uniform
         assert any("Resized 2 image" in message for kind, message in shown if kind == "info")
     finally:
-        root.destroy()
+        pass  # shared Tk root

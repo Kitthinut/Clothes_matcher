@@ -1,7 +1,8 @@
 """Automatic garment-colour detection from a Colour box (HSV + k-means).
 
 The annotator no longer asks the user to pick a colour: they draw a box over a
-representative patch of the garment and this module names the dominant colour.
+representative patch of the garment and this module names its main colours
+(a striped garment returns both colours with their pixel shares).
 
 Robustness measures:
 - trim the box border (sloppy boxes often include background),
@@ -104,9 +105,10 @@ def _rgb_from_hsv(h: float, s: float, v: float) -> tuple[int, int, int]:
     return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
 
 
-def analyze_color(image: Image.Image | np.ndarray, *, k: int = 3,
-                  allowed: set[str] | None = None, max_pixels: int = 12000) -> ColorInfo | None:
-    """Return the dominant colour of a garment crop as :class:`ColorInfo`."""
+def _cluster_colors(
+    image: Image.Image | np.ndarray, *, k: int = 3, max_pixels: int = 12000
+) -> list[ColorInfo]:
+    """Cluster crop pixels in HSV and return ranked, de-duplicated colours."""
     if isinstance(image, Image.Image):
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     else:
@@ -163,28 +165,82 @@ def analyze_color(image: Image.Image | np.ndarray, *, k: int = 3,
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
     _, labels, centers = cv2.kmeans(features, k, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
     counts = np.bincount(labels.ravel(), minlength=k)
-    biggest = int(np.argmax(counts))
+    total = float(counts.sum()) or 1.0
 
-    co, si, sat, val = (float(v) for v in centers[biggest])
-    hue = float(np.rad2deg(np.arctan2(si, co)) % 360.0)
-    sat, val = float(np.clip(sat, 0, 1)), float(np.clip(val, 0, 1))
-    friendly = name_from_hsv(hue, sat, val)
-    name = snap_to_schema(friendly, allowed)
-    rgb = _rgb_from_hsv(hue, sat, val)
-    return ColorInfo(
-        name=name, friendly=friendly, hsv=(hue, sat, val),
-        hex="#%02x%02x%02x" % rgb, fraction=float(counts[biggest]) / float(counts.sum()),
-    )
+    # Merge clusters that landed on the same colour name (k-means often splits
+    # one colour into two similar shades). Use a circular mean for hue.
+    grouped: dict[str, dict[str, float]] = {}
+    for (co, si, sat, val), count in zip(centers, counts):
+        hue = float(np.rad2deg(np.arctan2(float(si), float(co))) % 360.0)
+        sat, val = float(np.clip(sat, 0, 1)), float(np.clip(val, 0, 1))
+        friendly = name_from_hsv(hue, sat, val)
+        entry = grouped.setdefault(friendly, {"n": 0.0, "cos": 0.0, "sin": 0.0, "s": 0.0, "v": 0.0})
+        rad = np.deg2rad(hue)
+        entry["n"] += float(count)
+        entry["cos"] += float(count) * np.cos(rad)
+        entry["sin"] += float(count) * np.sin(rad)
+        entry["s"] += float(count) * sat
+        entry["v"] += float(count) * val
+
+    results: list[ColorInfo] = []
+    for friendly, entry in sorted(grouped.items(), key=lambda kv: -kv[1]["n"]):
+        n = entry["n"] or 1.0
+        hue = float(np.rad2deg(np.arctan2(entry["sin"], entry["cos"])) % 360.0)
+        sat, val = float(np.clip(entry["s"] / n, 0, 1)), float(np.clip(entry["v"] / n, 0, 1))
+        rgb = _rgb_from_hsv(hue, sat, val)
+        results.append(ColorInfo(
+            name=friendly, friendly=friendly, hsv=(hue, sat, val),
+            hex="#%02x%02x%02x" % rgb, fraction=entry["n"] / total,
+        ))
+    return results
+
+
+def analyze_colors(
+    image: Image.Image | np.ndarray, *, k: int = 3,
+    allowed: set[str] | None = None, max_colors: int = 3,
+    min_fraction: float = 0.12, max_pixels: int = 12000,
+) -> list[ColorInfo]:
+    """Return up to *max_colors* dominant colours of a garment crop.
+
+    Small stray clusters (background/skin in a slightly sloppy box) are
+    ignored; a striped or multi-colour garment returns its main colours ranked
+    by pixel share. Names are snapped to *allowed* (the schema colour classes).
+    """
+    clusters = _cluster_colors(image, k=k, max_pixels=max_pixels)
+    if not clusters:
+        return []
+    results: list[ColorInfo] = []
+    seen: set[str] = set()
+    for cluster in clusters:
+        if results and cluster.fraction < min_fraction:
+            continue
+        name = snap_to_schema(cluster.friendly, allowed)
+        if name in seen:
+            continue
+        seen.add(name)
+        results.append(ColorInfo(
+            name=name, friendly=cluster.friendly, hsv=cluster.hsv,
+            hex=cluster.hex, fraction=cluster.fraction,
+        ))
+        if len(results) >= max_colors:
+            break
+    return results
+
+
+def analyze_color(image: Image.Image | np.ndarray, *, k: int = 3,
+                  allowed: set[str] | None = None, max_pixels: int = 12000) -> ColorInfo | None:
+    """Return only the dominant colour (backwards-compatible helper)."""
+    colors = analyze_colors(image, k=k, allowed=allowed, max_colors=1, max_pixels=max_pixels)
+    return colors[0] if colors else None
 
 
 def detect_colors(image: Image.Image | np.ndarray, k: int = 3,
                   allowed: set[str] | None = None) -> list[dict[str, Any]]:
-    """Backwards-compatible list form; returns the single dominant colour."""
-    info = analyze_color(image, k=k, allowed=allowed)
-    return [] if info is None else [info.to_dict()]
+    """List-of-dicts form; now includes all significant colours."""
+    return [info.to_dict() for info in analyze_colors(image, k=k, allowed=allowed)]
 
 
 def dominant_color_name(image: Image.Image | np.ndarray, allowed: set[str] | None = None) -> str | None:
-    """Backwards-compatible name-only helper used by export/ingest/mock data."""
-    info = analyze_color(image, allowed=allowed)
-    return info.name if info else None
+    """Return the primary colour name (backwards-compatible helper)."""
+    colors = analyze_colors(image, allowed=allowed, max_colors=1)
+    return colors[0].name if colors else None

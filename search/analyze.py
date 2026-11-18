@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import numpy as np
 from PIL import Image
 
-from common.colors import dominant_color_name
+from common.colors import analyze_colors
 from common.config import Config, load_config
 from common.logging_conf import LOGGER
 from common.schema import Region, Schema, load_schema
@@ -256,14 +256,18 @@ class Analyzer:
                     key = f"{detection.region}_{detection.side}"
                 attributes[key] = self._probabilities(detection, crop)
 
-            # HSV colour from the whole-garment crop if no colour detection exists.
+            # HSV colours from the whole-garment crop if no Colour box existed.
             if not any(k.startswith("color") for k in attributes):
-                name = dominant_color_name(garment_crop, set(self.schema.color_classes))
-                if name:
+                colors = analyze_colors(garment_crop, allowed=set(self.schema.color_classes), max_colors=3)
+                if colors:
+                    total = sum(c.fraction for c in colors) or 1.0
                     values = self.schema.color_classes
-                    others = [c for c in values if c != name]
+                    probs = {c: 0.02 for c in values}
+                    for color in colors:
+                        probs[color.name] = probs.get(color.name, 0.0) + 0.9 * color.fraction / total
+                    norm = sum(probs.values()) or 1.0
                     attributes["color"] = AttributePrediction(
-                        label=name, probs={**{c: 0.05 / max(1, len(others)) for c in others}, name: 0.95},
+                        label=colors[0].name, probs={k: v / norm for k, v in probs.items()},
                     )
 
             garments.append(GarmentResult(

@@ -35,7 +35,7 @@ from annotator.store import (  # noqa: E402
     AnnotationStore, Box, ImageAnnotation, resolve_annotation_dirs,
 )
 from annotator.ui_utils import tip  # noqa: E402
-from common.colors import ColorInfo, analyze_color  # noqa: E402
+from common.colors import ColorInfo, analyze_colors  # noqa: E402
 from common.config import Config, load_config  # noqa: E402
 from common.logging_conf import LOGGER  # noqa: E402
 from common.mock_data import ensure_mock_dataset  # noqa: E402
@@ -127,7 +127,7 @@ class DesktopAnnotator:
         self.redo_stack: list[dict] = []
         self.skipped: list[str] = list(self.store.load_session().get("skipped", []))
         self.pil_image: Image.Image | None = None
-        self.color_info: dict[str, ColorInfo] = {}
+        self.color_info: dict[str, list[ColorInfo]] = {}
         self.pending_labels: dict[str, str] = {}
 
         # Attribute chips (whole-item box is internal, not a chip).
@@ -521,21 +521,27 @@ class DesktopAnnotator:
         for garment in self.schema.garment_names:
             boxes = [b for b in self.boxes() if b.garment == garment and b.region == "color"]
             for box in boxes:
-                info = self.color_info.get(box.id)
-                if info is None:
+                colors = self.color_info.get(box.id)
+                if not colors:
                     self.refresh_color(box)
-                    info = self.color_info.get(box.id)
-                if info is None:
+                    colors = self.color_info.get(box.id)
+                if not colors:
                     continue
-                card = tk.Frame(self.color_frame, bg=PANEL, highlightbackground="#d8dbe5",
-                                highlightthickness=1)
-                card.pack(fill="x", pady=2)
-                swatch = tk.Label(card, text="  ", bg=info.hex, width=3, relief="flat")
-                swatch.pack(side="left", padx=6, pady=5)
-                hsv = ", ".join(f"{v:.2f}" for v in info.hsv)
-                tk.Label(card, text=f"{garment.title()}: {info.friendly} {info.hex}\nHSV ({hsv})",
-                         bg=PANEL, fg=TEXT, font=FONT, justify="left").pack(side="left", pady=4)
-                tip(card, "Detected automatically — move or redraw the Colour box to update")
+                ttk.Label(self.color_frame, text=f"{garment.title()} — {len(colors)} colour(s):",
+                          font=FONT_BOLD).pack(fill="x", pady=(4, 1))
+                for color in colors:
+                    row = tk.Frame(self.color_frame, bg=PANEL, highlightbackground="#d8dbe5",
+                                   highlightthickness=1)
+                    row.pack(fill="x", pady=1)
+                    swatch = tk.Label(row, text="  ", bg=color.hex, width=3, relief="flat")
+                    swatch.pack(side="left", padx=6, pady=3)
+                    hsv = ", ".join(f"{v:.2f}" for v in color.hsv)
+                    tk.Label(
+                        row,
+                        text=f"{color.friendly} {color.hex}  {round(color.fraction * 100)}%\nHSV ({hsv})",
+                        bg=PANEL, fg=TEXT, font=FONT, justify="left",
+                    ).pack(side="left", pady=3)
+                    tip(row, "Detected automatically — redraw the Colour box to update")
 
     def render_regions(self) -> None:
         self.region_list.delete(0, "end")
@@ -638,20 +644,26 @@ class DesktopAnnotator:
         self.boxes().append(box)
         return box
 
-    def refresh_color(self, box: Box) -> ColorInfo | None:
-        """Compute colour from a Colour box and store label + HSV in the box."""
+    def refresh_color(self, box: Box) -> list[ColorInfo]:
+        """Detect all significant colours in a Colour box and store them.
+
+        The first colour stays the box's ``label``/``hsv`` (so YOLO training
+        keeps one class), while the full ranked list is stored in ``colors``.
+        """
         if self.pil_image is None:
-            return None
+            return []
         x1, y1, x2, y2 = box.xyxy
         crop = self.pil_image.crop((max(0, x1), max(0, y1),
                                     min(self.pil_image.width, x2), min(self.pil_image.height, y2)))
-        info = analyze_color(crop, allowed=set(self.schema.color_classes))
-        if info is None:
-            return None
-        box.label = info.name
-        box.hsv = info.hsv
-        self.color_info[box.id] = info
-        return info
+        colors = analyze_colors(crop, allowed=set(self.schema.color_classes))
+        if not colors:
+            self.color_info.pop(box.id, None)
+            return []
+        box.label = colors[0].name
+        box.hsv = colors[0].hsv
+        box.colors = [color.to_dict() for color in colors]
+        self.color_info[box.id] = colors
+        return colors
 
     def on_box_created(self, xyxy: tuple[int, int, int, int]) -> None:
         """Create or replace the box for the active region at *xyxy*."""
@@ -664,20 +676,23 @@ class DesktopAnnotator:
             self.render_all()
             return
         self.selected = box.id
-        info = self.refresh_color(box) if region == "color" else None
+        colors = self.refresh_color(box) if region == "color" else []
         self.save(show_status=False)
         self.render_all()
         self.set_status(
-            f"{garment.title()} > Colour: {info.friendly} {info.hex}" if info
-            else f"{garment.title()} > {region}: box saved"
+            f"{garment.title()} > Colours: " + ", ".join(f"{c.friendly} {c.hex}" for c in colors)
+            if colors else f"{garment.title()} > {region}: box saved"
         )
 
     def on_box_changed(self, box: Box) -> None:
         """Persist a moved/resized box; refresh colour live."""
         if box.region == "color":
-            info = self.refresh_color(box)
-            if info:
-                self.set_status(f"{box.garment.title()} > Colour: {info.friendly} {info.hex}")
+            colors = self.refresh_color(box)
+            if colors:
+                self.set_status(
+                    f"{box.garment.title()} > Colours: "
+                    + ", ".join(f"{c.friendly} {c.hex}" for c in colors)
+                )
         self.save(show_status=False)
         self.render_all()
 
