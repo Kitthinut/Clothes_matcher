@@ -5,6 +5,7 @@ from __future__ import annotations
 import zipfile
 
 import gradio  # noqa: F401  (keeps import order consistent with other tests)
+import yaml
 from PIL import Image
 
 from annotator.image_check import inspect_images, show_image_report
@@ -58,9 +59,12 @@ def test_friend_kit_zip_has_only_needed_files(tmp_path) -> None:
     with zipfile.ZipFile(target) as archive:
         names = {n.replace("\\", "/") for n in archive.namelist()}
         guide = archive.read("Raja-Fashion/SHARE_WITH_FRIENDS.md").decode("utf-8")
+        friend_cfg = yaml.safe_load(archive.read("Raja-Fashion/config.yaml").decode("utf-8"))
     expected = {f"Raja-Fashion/{name}" for name in FRIEND_FILES}
     assert expected.issubset(names)
     assert not any("dataset" in n.lower() or n.endswith(".pt") for n in names)
     assert not any(n.startswith("Raja-Fashion/search/") or n.startswith("Raja-Fashion/train/") for n in names)
     assert "no `.txt` file" in guide
     assert "Raja-Fashion/annotator/resize_tool.py" in names
+    assert friend_cfg["paths"]["images_raw"] == "images"
+    assert friend_cfg["paths"]["annotations"] == "."

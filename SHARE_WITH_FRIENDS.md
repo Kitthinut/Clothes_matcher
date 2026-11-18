@@ -57,7 +57,8 @@ Raja-Fashion\images\
 python -m annotator.app --images "D:\my_outfit_photos" --annotations "D:\my_labels"
 ```
 
-If you leave out the flags, the app uses `images` and `annotations` folders.
+If you leave out the flags, the app uses the `images` folder for your photos
+and writes a single `annotations.json` next to it.
 
 **Important:**
 - Use `.jpg`, `.jpeg`, or `.png` pictures.
@@ -70,7 +71,7 @@ If you leave out the flags, the app uses `images` and `annotations` folders.
   on the spare sides so nothing is squashed or cropped. Any labels already
   drawn are rescaled to the new size automatically. You can say no and just
   tell me in your notes.
-- Keep the `annotations` folder that the app creates. That is your work.
+- Keep `annotations.json` — that one file is all your labelling work.
 
 ---
 
@@ -129,7 +130,7 @@ You will have:
 ├─ images\                      ← all your pictures
 │   ├─ IMG_0001.jpg
 │   └─ ...
-├─ annotations.json              ← ONE file with all your boxes
+├─ annotations.json              ← the ONE file the app wrote for all your boxes
 └─ README.txt                    ← your name, date, any notes
 ```
 
@@ -149,7 +150,7 @@ Notes: picture 7 has two tops; I boxed both. Some images are 640x480, others 500
 - [ ] Each garment you labelled has its region boxes (both sleeve arms).
 - [ ] You didn't rename pictures after labelling.
 - [ ] `README.txt` has your name, the date and any size/quality notes.
-- [ ] Both folders are inside the zip (not just the pictures).
+- [ ] The `images` folder **and** `annotations.json` are both inside the zip.
 
 That's all — no need to send the annotator back.
 

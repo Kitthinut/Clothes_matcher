@@ -106,10 +106,11 @@ for every command.
 
 **Sharing the labelling work:** run
 `python -m annotator.make_friend_kit` to build `Raja-Fashion-lite.zip` — a small
-package with only the annotator, schema, config, lightweight requirements and
-[`SHARE_WITH_FRIENDS.md`](SHARE_WITH_FRIENDS.md). Friends do not need the full
-project, YOLO, a GPU or an account. They send back images + `*.json` only;
-merge with `python -m annotator.merge_kits <kit>`.
+package with only the annotator, schema, a friend-specific config (photos in
+`images/`, labels in one root-level `annotations.json`), lightweight requirements
+and [`SHARE_WITH_FRIENDS.md`](SHARE_WITH_FRIENDS.md). Friends do not need the
+full project, YOLO, a GPU or an account. They send back `images/` + that one
+`annotations.json`; merge with `python -m annotator.merge_kits <kit>`.
 
 ---
 

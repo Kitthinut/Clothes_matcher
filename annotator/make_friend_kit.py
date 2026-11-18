@@ -14,6 +14,9 @@ from __future__ import annotations
 import argparse
 import zipfile
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from common.paths import PROJECT_ROOT
 
@@ -39,6 +42,20 @@ FRIEND_FILES: tuple[str, ...] = (
 )
 
 
+def friend_config(source: Path) -> str:
+    """Return a config that keeps a friend's photos and labels in one place.
+
+    ``images/`` holds their pictures; ``annotations.json`` is written next to
+    it at the project root, so they can send back exactly those two things.
+    """
+    data: Any = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    paths = data.setdefault("paths", {})
+    paths["images_raw"] = "images"
+    paths["annotations"] = "."
+    paths["catalog"] = "catalog"
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
 def make_friend_kit(out: str | Path | None = None, root: Path | None = None) -> Path:
     """Create the zip and return its path."""
     base = Path(root) if root is not None else PROJECT_ROOT
@@ -53,7 +70,10 @@ def make_friend_kit(out: str | Path | None = None, root: Path | None = None) -> 
 
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in FRIEND_FILES:
-            archive.write(base / name, arcname=f"Raja-Fashion/{name}")
+            if name == "config.yaml":
+                archive.writestr("Raja-Fashion/config.yaml", friend_config(base / name))
+            else:
+                archive.write(base / name, arcname=f"Raja-Fashion/{name}")
     return target
 
 
