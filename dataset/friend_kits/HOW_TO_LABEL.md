@@ -3,13 +3,19 @@
 1. Install Python 3.10+ and the packages:
    `pip install pillow opencv-python` (numpy comes with them)
 2. Open a terminal in the **outfit-ai** folder.
-3. Run (replace the folder with your kit folder):
+3. Prepare the top dataset folder (no friend name is needed):
 
    ```
-   python 1_label/annotate.py dataset/friend_kits/<kit_name> --garment top
+   python 1_label/make_kit.py
    ```
 
-4. For each picture:
+4. Put the pictures to label in `dataset/top/images`, then run:
+
+   ```
+   python 1_label/annotate.py --garment top
+   ```
+
+5. For each picture:
    - Choose **Garment**, select length, type, and pattern together, draw one
      box around the garment, then press **Enter** to save that region.
    - For tops, choose **Neck** to select a neck type and draw its own box.
@@ -22,8 +28,8 @@
      saved.
    - **Left / Right** arrows move between pictures, **Ctrl+N** jumps to the
      next unlabelled picture, and **Del** removes a bad picture.
-5. Everything saves automatically into `annotations.json` in your kit folder.
-   Send the whole kit folder back when done.
+6. Everything saves automatically into `dataset/top/annotations.json`. Send
+   the `dataset/top` folder back when done.
 
 Tips
 - Look at `LABELS.md` inside the kit for the exact label words.

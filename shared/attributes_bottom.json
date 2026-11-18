@@ -4,30 +4,25 @@
   "categories": [
     {"key": "waist_length", "title": "Waist length", "mode": "single", "options": [
       {"name": "low-rise", "aliases": ["low", "low rise", "hiphugger"]},
-      {"name": "mid-rise", "aliases": ["mid", "middle", "regular waist"]},
       {"name": "high-rise", "aliases": ["high", "high waist", "high waisted"]}
     ]},
     {"key": "bottom_length", "title": "Length", "mode": "single", "options": [
-      {"name": "mini", "aliases": ["micro", "short skirt"]},
-      {"name": "knee-length", "aliases": ["knee", "midi"]},
       {"name": "cropped", "aliases": ["ankle", "crop"]},
       {"name": "full-length", "aliases": ["long", "full", "floor length"]},
       {"name": "shorts", "aliases": ["short", "short pant"]}
     ]},
     {"key": "pattern", "title": "Pattern", "mode": "multi", "options": [
-      {"name": "solid", "aliases": ["plain", "no pattern"]},
       {"name": "dotted", "aliases": ["dot", "dots", "polka dot", "polka"]},
       {"name": "striped", "aliases": ["stripe", "stripes", "line"]},
       {"name": "checked", "aliases": ["check", "plaid", "gingham", "tartan"]},
-      {"name": "floral", "aliases": ["flower", "flowers"]},
+      {"name": "plain", "aliases": ["plain", "solid"]},
       {"name": "graphic", "aliases": ["print", "logo", "text", "picture"]}
     ]},
     {"key": "fit_type", "title": "Fit type", "mode": "single", "options": [
       {"name": "skinny", "aliases": ["tight", "slim", "legging"]},
       {"name": "straight", "aliases": ["regular fit", "straight leg"]},
-      {"name": "wide-leg", "aliases": ["wide", "palazzo", "culotte"]},
-      {"name": "relaxed", "aliases": ["loose", "baggy", "boyfriend"]},
-      {"name": "flare", "aliases": ["boot cut", "bootcut", "bell bottom", "flared"]}
+      {"name": "baggy", "aliases": ["wide", "palazzo", "culotte"]},
+      {"name": "bootcut", "aliases": ["flare", "bell bottom", "flared"]}
     ]}
   ]
 }

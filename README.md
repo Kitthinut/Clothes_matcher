@@ -63,7 +63,7 @@ If TF and PyTorch fight over package versions, make a second venv
 outfit-ai/
 ├─ 1_label/            labelling tools
 │  ├─ annotate.py        GUI labeller (garment + typed neck/sleeve regions)
-│  ├─ make_kit.py        create a kit for a friend
+│  ├─ make_kit.py        prepare dataset/top (or dataset/bottom)
 │  └─ merge_annotations.py  validate & merge kits into the dataset
 ├─ 2_train/
 │  ├─ pytorch/           model.py dataset.py train.py inference.py
@@ -86,7 +86,7 @@ outfit-ai/
 ├─ dataset/
 │  ├─ top/    images/ + annotations.json + splits/   (training data)
 │  ├─ bottom/ same
-│  └─ friend_kits/<name>/  <- GIVE THIS FOLDER TO FRIENDS TO LABEL
+│  └─ friend_kits/       optional folders for annotations received from friends
 └─ weights/              trained model files
 ```
 
@@ -96,29 +96,32 @@ outfit-ai/
 REM 0. quality-check new pictures before labelling (optional but recommended)
 python image_precheck.py dataset\top\images
 
-REM 1. label your own pictures (or make a friend kit first, see below)
+REM 1. prepare the top dataset folder (no arguments defaults to top)
+python 1_label\make_kit.py
+
+REM 2. label your own pictures
 python 1_label\annotate.py --garment top
 
-REM 2. merge friend kits when they send them back
+REM 3. merge annotations received from a friend (optional)
 python 1_label\merge_annotations.py
 
-REM 3. split 70/15/15
+REM 4. split 70/15/15
 python shared\split.py --garment top
 
-REM 4. train (either backend)
+REM 5. train (either backend)
 python 2_train\pytorch\train.py --garment top
 python 2_train\pytorch\train.py --garment top --test-only      REM final check
 python 2_train\tensorflow\train.py --garment top               REM TF alternative
 
-REM 4b. compare backends on the same test split (needs both installed)
+REM 5b. compare backends on the same test split (needs both installed)
 python evaluation\pytorch_vs_tensorflow.py --garment top
 
-REM 5. build your closet from photos of your own clothes (uses the trained model)
+REM 6. build your closet from photos of your own clothes (uses the trained model)
 python closet\add_to_closet.py --add "D:\my_clothes_photos" --garment top
 python closet\add_to_closet.py --list
 python closet\add_to_closet.py --rebuild           REM after retraining
 
-REM 6. match a reference outfit image against YOUR closet
+REM 7. match a reference outfit image against YOUR closet
 python 3_match\match.py my_reference.jpg --garment top
 REM tweak the weighting: attribute vs colour vs embedding, or boost one
 REM attribute (any schema key works, e.g. --w-pattern 2)
@@ -167,19 +170,24 @@ matches as tiles with score, attributes and colours. The GUI's
 python 3_match\match.py my_reference.jpg --garment top --save-board results
 ```
 
-## 6. Friend kits (labelling without installing everything)
+## 6. Prepare the annotation dataset
 
 ```cmd
-python 1_label\make_kit.py --name kawfang --garment bottom --from "D:\photos"
+python 1_label\make_kit.py
+python 1_label\make_kit.py --garment bottom
+python 1_label\make_kit.py --from "D:\photos"
 ```
 
-- Sends `dataset/friend_kits/kawfang/` to your friend (images + empty
-  annotations + `LABELS.md` cheat sheet).
-- Friend follows `dataset/friend_kits/HOW_TO_LABEL.md`
-  (needs only `pip install pillow opencv-python`).
-- You run `python 1_label/merge_annotations.py` — images get the kit name as a
-  prefix, annotations merge into the master file (invalid kits, duplicate
-  images and conflicting labels are reported, never silently overwritten).
+With no arguments, the script prepares `dataset/top/` and initializes
+`annotations.json` only if it does not exist. Use `--garment bottom` for
+`dataset/bottom/`; `--from` optionally copies photos into its `images/`
+folder. Existing annotations and images are preserved. No friend name is
+required.
+
+To label, run `python 1_label\annotate.py --garment top`. You can send a copy
+of the project and the `dataset/top/` folder to a friend; they can return
+their completed dataset folder for merging with
+`python 1_label\merge_annotations.py --garment top <folder>`.
 
 ## 7. Backend choice — TF or PyTorch?
 

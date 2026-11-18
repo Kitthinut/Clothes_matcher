@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "package_id": "kawfang-20261117-b2f7",
+  "annotator": "kawfang",
+  "garment": "bottom",
+  "image_root": "images",
+  "target_size": [
+    288,
+    384
+  ],
+  "images": {}
+}
