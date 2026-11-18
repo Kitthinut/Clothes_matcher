@@ -1,0 +1,9 @@
+# Only needed for training / search / the optional browser annotator.
+# The desktop annotator needs only requirements.txt.
+-r requirements.txt
+
+ultralytics>=8.4
+gradio>=5.0
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9

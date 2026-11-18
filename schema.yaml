@@ -1,0 +1,68 @@
+# Single source of truth for the Raja-Fashion project (schema v2).
+#
+# v2 = multi-class object detection: every attribute REGION is its own box and
+# its own YOLO class (region + value, e.g. top_neck_crew). Each garment may
+# also have one whole-item box (top_garment / bottom_garment) used for HSV
+# colour detection and visual similarity. An image may contain only a top,
+# only a bottom, or both.
+#
+# Adding a region/class here needs no code changes: dropdowns, YOLO class
+# list, datasets, classifiers, DB filters and tests are all generated from it.
+version: 2
+
+# HSV colour names used by common/colors.py (auto-detected, editable in the UI).
+color_classes: [black, white, gray, red, orange, brown, yellow, green, teal, blue, navy, purple, pink]
+
+garments:
+  top:
+    garment_box: top_garment
+    regions:
+      length:
+        title: Length
+        sides: [center]
+        classes: [cropped, regular]
+      type:
+        title: Clothes type
+        sides: [center]
+        classes: [no_button, half_button, button_down]
+      pattern:
+        title: Pattern
+        sides: [center]
+        classes: [dot, stripe, check, graphic, plain, corner_only]
+      neck:
+        title: Neck type
+        sides: [center]
+        classes: [crew, v, square, off_shoulder, polo]
+      sleeves:
+        title: Sleeves
+        sides: [left, right]
+        classes: [long, short, sleeveless, camis]
+      color:
+        title: Colour (HSV)
+        sides: [center]
+        source: hsv
+        classes: [black, white, gray, red, orange, brown, yellow, green, teal, blue, navy, purple, pink]
+  bottom:
+    garment_box: bottom_garment
+    regions:
+      waist_length:
+        title: Waist length
+        sides: [center]
+        classes: [low, high]
+      bottom_length:
+        title: Bottom length
+        sides: [center]
+        classes: [long, short, cropped]
+      pattern:
+        title: Pattern
+        sides: [center]
+        classes: [graphic, stripe, check, plain]
+      fit_type:
+        title: Fit type
+        sides: [center]
+        classes: [skinny, straight, baggy, boot_cut]
+      color:
+        title: Colour (HSV)
+        sides: [center]
+        source: hsv
+        classes: [black, white, gray, red, orange, brown, yellow, green, teal, blue, navy, purple, pink]

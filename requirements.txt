@@ -1,0 +1,8 @@
+# Lightweight dependencies for the desktop annotator (no YOLO/GPU needed).
+Pillow>=10.0
+numpy>=1.24
+opencv-python>=4.8
+PyYAML>=6.0
+
+# Optional, only for running the test suite
+pytest>=8.0

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Personal / shared annotation data (regenerate with common.mock_data if needed)
+sample_data/
+images_original_backup/
+*.json.bak
+*.json.v1.bak
+
+# Generated outputs
+datasets/
+models/
+db/
+*.sqlite3
+*.pt
+*.onnx
+*.npz
+
+# Friend packages and temporary files
+Raja-Fashion-lite.zip
+*.zip
+_server_pid.txt
+_desktop_pid.txt
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

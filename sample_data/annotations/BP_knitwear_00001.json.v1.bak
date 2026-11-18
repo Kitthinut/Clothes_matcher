@@ -1,0 +1,25 @@
+{
+  "image": "BP_knitwear_00001.jpg",
+  "width": 405,
+  "height": 539,
+  "boxes": [
+    {
+      "id": "dde5fc45fb",
+      "label": "top",
+      "xyxy": [
+        45,
+        125,
+        357,
+        478
+      ],
+      "attributes": {
+        "length": "regular",
+        "type": "no_button",
+        "neck": "polo",
+        "pattern": "plain",
+        "sleeves": "long"
+      },
+      "hidden": false
+    }
+  ]
+}

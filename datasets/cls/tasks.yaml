@@ -1,0 +1,70 @@
+top_length:
+- cropped
+- regular
+top_type:
+- no_button
+- half_button
+- button_down
+top_pattern:
+- dot
+- stripe
+- check
+- graphic
+- plain
+- corner_only
+top_neck:
+- crew
+- v
+- square
+- off_shoulder
+- polo
+top_sleeves:
+- long
+- short
+- sleeveless
+- camis
+top_color:
+- black
+- white
+- gray
+- red
+- orange
+- brown
+- yellow
+- green
+- teal
+- blue
+- navy
+- purple
+- pink
+bottom_waist_length:
+- low
+- high
+bottom_bottom_length:
+- long
+- short
+- cropped
+bottom_pattern:
+- graphic
+- stripe
+- check
+- plain
+bottom_fit_type:
+- skinny
+- straight
+- baggy
+- boot_cut
+bottom_color:
+- black
+- white
+- gray
+- red
+- orange
+- brown
+- yellow
+- green
+- teal
+- blue
+- navy
+- purple
+- pink

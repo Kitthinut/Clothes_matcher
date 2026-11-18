@@ -1,0 +1,46 @@
+# Project configuration.
+project: Raja-Fashion
+
+model:
+  # The ONE variable holding the chosen weights family.
+  # Verified 2026-11-18: YOLO26 is the newest STABLE Ultralytics family
+  # (docs.ultralytics.com/models); YOLO27 is "coming soon" with no weights.
+  # Derivatives: yolo26n.pt (detect), yolo26n-cls.pt (classify).
+  family: yolo26n
+  imgsz: 640
+  device: auto          # auto | cpu | cuda | cuda:0
+  conf: 0.25            # detection confidence threshold
+  iou: 0.45             # detection NMS IoU
+
+paths:
+  images_raw: sample_data/images
+  annotations: sample_data/annotations
+  catalog: sample_data/catalog
+  datasets: datasets
+  models: models
+  database: db/raja_fashion.sqlite3
+
+train:
+  detect_epochs: 50
+  cls_epochs: 30
+  batch: 16
+  val_split: 0.2
+  min_samples_per_class: 3   # skip attributes/classes below this
+  min_total_samples: 20      # skip whole attribute below this
+  export_onnx: false
+  # Fashion-friendly augmentation: NO vertical flip, mild colour jitter only.
+  augment:
+    flipud: 0.0
+    fliplr: 0.5
+    hsv_h: 0.01
+    hsv_s: 0.3
+    hsv_v: 0.3
+    degrees: 5.0
+    translate: 0.05
+    scale: 0.4
+    shear: 2.0
+
+search:
+  default_top_k: 12
+  embedding_weight: 1.0
+  embedding_backend: yolo    # yolo | clip | mock
