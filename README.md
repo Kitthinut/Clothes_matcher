@@ -11,6 +11,9 @@ All garments, attributes and class labels live in [`schema.yaml`](schema.yaml),
 which is the single source of truth for the annotator, dataset export, training,
 database, scoring, UI and tests. Adding an attribute needs no code changes.
 
+For the full architecture, file-by-file reference, control map, formulas and
+tooling, see [`TECHNICAL_DOCUMENTATION.md`](TECHNICAL_DOCUMENTATION.md).
+
 ---
 
 ## 1. Model choice (verified 2026-11-18)
