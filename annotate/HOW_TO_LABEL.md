@@ -89,34 +89,26 @@ Always label **both arms** when they are visible.
 | **sleeveless** | No sleeve at all (tank top, muscle tee) | Draw a box on the shoulder / armhole area to show there is no sleeve fabric. | ![sleeveless](examples/top_sleeve_sleeveless.jpg) |
 
 **Important side rule**
-- **Sleeve — LEFT arm** = our left arm.
-- **Sleeve — RIGHT arm** = our right arm.
+- **Sleeve — LEFT arm** = the wearer’s left arm (appears on the **right side** of the photo when the person is facing you).
+- **Sleeve — RIGHT arm** = the wearer’s right arm (appears on the **left side** of the photo).
 - If one arm is completely hidden, still label the visible one. The tool will warn you if a side is missing.
 
 ---
 
 ## 2. Bottoms
 
-### 2.1 Waist length
+Bottoms only have three attributes:
 
-| Value | When to choose | How to label | Visual example |
-|-------|----------------|--------------|----------------|
-| **high_waist** | Waistband sits at or above the natural waist (near the navel) | Draw a horizontal box tightly around the waistband. The box should sit high on the torso. | ![high](examples/bottom_waist_high.jpg) |
-| **low_waist** | Waistband sits clearly on the hips, below the navel | Draw a horizontal box around the waistband. You should see skin or a top between the navel and the waistband. | ![low](examples/bottom_waist_low.jpg) |
-
----
-
-### 2.2 Length
+### 2.1 Length
 
 | Value | When to choose | How to label | Visual example |
 |-------|----------------|--------------|----------------|
 | **long** | Reaches the ankle or the floor | Draw a box from the waistband all the way down to the hem near the shoes. | ![long](examples/bottom_length_long.jpg) |
 | **short** | Ends above the knee | Draw a box from the waistband to the hem. The box should end above the knee and show the thigh. | ![short](examples/bottom_length_short.jpg) |
-| **cropped** | Ends between the knee and the ankle (ankle-length / 7/8) | Draw a box from the waistband to the hem. The hem should be clearly above the ankle but below the knee. | ![cropped](examples/bottom_length_cropped.jpg) |
 
 ---
 
-### 2.3 Pattern
+### 2.2 Pattern
 
 | Value | When to choose | How to label | Visual example |
 |-------|----------------|--------------|----------------|
@@ -127,14 +119,13 @@ Always label **both arms** when they are visible.
 
 ---
 
-### 2.4 Fit type
+### 2.3 Fit type
 
 | Value | When to choose | How to label | Visual example |
 |-------|----------------|--------------|----------------|
 | **skinny** | Tight from hip all the way to the ankle | Draw a box that follows the leg closely. The fabric should look stretched against the leg. | ![skinny](examples/bottom_fit_skinny.jpg) |
 | **straight** | Same width from knee to ankle (classic straight-leg) | Draw a box down the leg. The width at the knee and at the ankle should look similar. | ![straight](examples/bottom_fit_straight.jpg) |
 | **baggy** | Very loose, lots of extra fabric and volume | Draw a generous box. You should see lots of empty space / folds inside the box. | ![baggy](examples/bottom_fit_baggy.jpg) |
-| **bootcut** | Slim through the knee, then flares out at the hem | Draw a box from thigh to hem. The bottom of the box should be noticeably wider than the knee area. | ![bootcut](examples/bottom_fit_bootcut.jpg) |
 
 ---
 
@@ -193,6 +184,5 @@ zip -r my_labels.zip your_name_photos/
 - No duplicate boxes for the same region (except pattern)
 - Boxes are reasonably tight but still cover the whole region
 - For **cropped** tops: the box includes the midriff
-- For **high/low waist**: the box is clearly on the waistband
 
 Thank you — clean labels make the model much stronger!

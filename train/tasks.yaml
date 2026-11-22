@@ -1,38 +1,57 @@
-# One block = one experiment. Add a block whenever you want to try a new label.
-# Your annotation JSONs never change; only this file decides how they are turned into a dataset.
-#
-# mode: detect -> YOLO boxes, class = what you define below   (use this for live_demo.py)
-# mode: cls    -> crops of each box, one folder per class     (attribute classifiers, later)
-#
-# Two ways to define classes:
-#   (a) object + attribute + classes: an attribute value becomes the class.
-#       `else:` catches every other value of that attribute.
-#   (b) objects: [...]: the object type itself is the class (parts detector).
+# Progressive tasks. Start with one attribute, then expand.
+# mode: "detect" = YOLO detection (one class per attribute value)
+#        "cls"    = classification on cropped boxes (good for attributes)
 
-# ---- Step 1: the first experiment (crew vs not crew), detected live ----
+# ---- Phase 1: test single attributes first ----
 neck_crew:
   mode: detect
   object: top
   attribute: neck
   classes:
     crew: [crew]
+    not_crew: [v, polo, square, off_shoulder]
   else: not_crew
-  model: yolo26n.pt
+  model: yolo11n.pt          # or yolo26n.pt when available
   imgsz: 640
 
-# Same question, but as a crop classifier (compare against the detector)
-neck_crew_cls:
-  mode: cls
+top_length:
+  mode: detect
   object: top
-  attribute: neck
+  attribute: length
   classes:
-    crew: [crew]
-  else: not_crew
-  model: yolo26n-cls.pt   # if the download fails, check the exact name in the Ultralytics docs
-  imgsz: 224
+    regular: [regular]
+    cropped: [cropped]
+  model: yolo11n.pt
+  imgsz: 640
 
-# ---- Step 2: more categories ----
-top_neck_all:
+bottom_fit:
+  mode: detect
+  object: bottom
+  attribute: fit
+  classes:
+    skinny: [skinny]
+    straight: [straight]
+    baggy: [baggy]
+  model: yolo11n.pt
+  imgsz: 640
+
+# ---- Full multi-class detection ----
+tops_full:
+  mode: detect
+  objects: [top]
+  # class names become the combination of attributes or just "top"
+  # For simplicity we keep a single "top" class and rely on attributes later
+  model: yolo11n.pt
+  imgsz: 640
+
+bottoms_full:
+  mode: detect
+  objects: [bottom]
+  model: yolo11n.pt
+  imgsz: 640
+
+# ---- Classification tasks (crop the region, classify attribute) ----
+neck_cls:
   mode: cls
   object: top
   attribute: neck
@@ -42,38 +61,17 @@ top_neck_all:
     polo: [polo]
     square: [square]
     off_shoulder: [off_shoulder]
-  model: yolo26n-cls.pt
+  model: yolo11n-cls.pt
   imgsz: 224
 
-top_pattern:
+sleeve_cls:
   mode: cls
   object: top
-  attribute: pattern
+  attribute: sleeve
   classes:
-    dot: [dot]
-    check: [check]
-    stripe: [stripe]
-    corner_only: [corner_only]
-    graphic: [graphic]
-    plain: [plain]
-  model: yolo26n-cls.pt
+    short: [short]
+    long: [long]
+    camis: [camis]
+    sleeveless: [sleeveless]
+  model: yolo11n-cls.pt
   imgsz: 224
-
-bottom_fit:
-  mode: cls
-  object: bottom
-  attribute: fit
-  classes:
-    skinny: [skinny]
-    straight: [straight]
-    baggy: [baggy]
-    bootcut: [bootcut]
-  model: yolo26n-cls.pt
-  imgsz: 224
-
-# ---- Step 3: the final parts detector (every listed object must be boxed in every image!) ----
-parts:
-  mode: detect
-  objects: [top, bottom, sleeve_left, sleeve_right]
-  model: yolo26s.pt
-  imgsz: 640

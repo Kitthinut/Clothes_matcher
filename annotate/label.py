@@ -61,7 +61,6 @@ ATTR_TITLE = {
     "neck": "Neck type",
     "pattern": "Pattern",
     "sleeve": "Sleeve type",
-    "waist": "Waist length",
     "fit": "Fit type",
 }
 
@@ -77,7 +76,6 @@ REGIONS = {
         ("sleeve_right", "Sleeve — RIGHT arm", "sleeve"),
     ],
     "bottom": [
-        ("waist", "Waist length", "waist"),
         ("length", "Length", "length"),
         ("pattern", "Pattern", "pattern"),
         ("fit", "Fit type", "fit"),
@@ -102,7 +100,7 @@ DISPLAY_VALUES = {
 SHORT_TITLE = {
     "length": "Length", "button": "Button", "neck": "Neck", "pattern": "Pattern",
     "sleeve_left": "Sleeve L", "sleeve_right": "Sleeve R",
-    "waist": "Waist", "fit": "Fit",
+    "fit": "Fit",
 }
 
 def display_value(value):
@@ -495,6 +493,32 @@ class App:
         self.open_image(min(i, len(self.files) - 1))
 
     # ------------------------------------------------------------- image / data
+    def _letterbox_4x3(self, im: Image.Image) -> Image.Image:
+        """
+        Return a 4:3 portrait version of the image for display only.
+        Adds black bars if needed. Never touches the file on disk.
+        """
+        w, h = im.size
+        target_ratio = 4 / 3          # height / width
+
+        if abs(h / w - target_ratio) < 0.02:
+            return im                 # already close enough to 4:3
+
+        if h / w < target_ratio:
+            # too wide → add bars top & bottom
+            new_h = int(round(w * target_ratio))
+            new_w = w
+        else:
+            # too tall → add bars left & right
+            new_w = int(round(h / target_ratio))
+            new_h = h
+
+        canvas = Image.new("RGB", (new_w, new_h), (0, 0, 0))
+        x = (new_w - w) // 2
+        y = (new_h - h) // 2
+        canvas.paste(im, (x, y))
+        return canvas
+
     def open_image(self, i):
         self.save()
         self.cur, path = i, self.files[i]
@@ -502,6 +526,7 @@ class App:
         try:
             with Image.open(path) as im:
                 im = ImageOps.exif_transpose(im).convert("RGB")
+            im = self._letterbox_4x3(im)   # force 4:3 display so labelers are not confused
             im.thumbnail((1600, 1600))
             self.pil = im
         except Exception as e:

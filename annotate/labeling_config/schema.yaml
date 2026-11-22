@@ -1,22 +1,63 @@
-# Single source of truth for every label.
-# annotate/ (validator, labeling tool) and train/ (build_dataset.py) both read this file.
-# Values: lowercase, underscores, no spaces.
-#
-# JSON box convention used everywhere: [x_center, y_center, width, height], all normalized 0-1.
-# An attribute that is MISSING (or null) means "not labeled yet" -- never "none of the above".
-version: 1
+# Schema for raja_fashion labels.
+# Every object has: cls, region (for attribute-specific boxes), box [xc, yc, w, h] (normalized 0-1), attrs {}
 
-classes: [top, bottom, sleeve_left, sleeve_right]   # sleeves = WEARER's left/right
+classes:
+  - top
+  - bottom
 
 attributes:
   top:
-    length:  [regular, cropped]
-    button:  [none, half, down]
-    neck:    [crew, v, polo, square, off_shoulder]
-    pattern: [dot, check, stripe, corner_only, graphic, plain]
-    sleeve:  [short, long, camis, sleeveless]
+    length:
+      - regular
+      - cropped
+    button:
+      - none          # No-button
+      - half          # Half-button
+      - down          # Button-down
+    neck:
+      - crew
+      - v
+      - polo
+      - square
+      - off_shoulder
+    pattern:
+      - dot
+      - check
+      - stripe
+      - corner_only
+      - graphic
+      - plain
+    sleeve:
+      - short
+      - long
+      - camis
+      - sleeveless
+
   bottom:
-    waist:   [low, high]
-    length:  [long, short, cropped]
-    pattern: [graphic, stripe, check, plain]
-    fit:     [skinny, straight, baggy, bootcut]
+    length:
+      - long
+      - short
+    pattern:
+      - graphic
+      - stripe
+      - check
+      - plain
+    fit:
+      - skinny
+      - straight
+      - baggy
+
+# Regions used by the label tool (one box per region/attribute)
+# Sleeves are explicitly left/right so the model can learn side.
+regions:
+  top:
+    - length
+    - button
+    - neck
+    - pattern
+    - sleeve_left
+    - sleeve_right
+  bottom:
+    - length
+    - pattern
+    - fit
