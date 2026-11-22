@@ -1,0 +1,26 @@
+# data & generated
+data/
+annotate/**/delete/
+annotate/**/originals_before_4x3/
+train/datasets/
+train/runs/
+search/snapshot_*.jpg
+*.pt
+*.onnx
+*.engine
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# ide
+.idea/
+.vscode/
+*.swp
+.DS_Store

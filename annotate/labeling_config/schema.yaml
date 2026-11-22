@@ -1,0 +1,22 @@
+# Single source of truth for every label.
+# annotate/ (validator, labeling tool) and train/ (build_dataset.py) both read this file.
+# Values: lowercase, underscores, no spaces.
+#
+# JSON box convention used everywhere: [x_center, y_center, width, height], all normalized 0-1.
+# An attribute that is MISSING (or null) means "not labeled yet" -- never "none of the above".
+version: 1
+
+classes: [top, bottom, sleeve_left, sleeve_right]   # sleeves = WEARER's left/right
+
+attributes:
+  top:
+    length:  [regular, cropped]
+    button:  [none, half, down]
+    neck:    [crew, v, polo, square, off_shoulder]
+    pattern: [dot, check, stripe, corner_only, graphic, plain]
+    sleeve:  [short, long, camis, sleeveless]
+  bottom:
+    waist:   [low, high]
+    length:  [long, short, cropped]
+    pattern: [graphic, stripe, check, plain]
+    fit:     [skinny, straight, baggy, bootcut]

@@ -1,0 +1,7 @@
+ultralytics        # YOLO26 (AGPL-3.0 license)
+opencv-python
+pyyaml
+pillow
+pandas
+matplotlib
+numpy
