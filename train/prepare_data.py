@@ -5,11 +5,14 @@ Prepare all labeled data before training.
 What it does
 ------------
 1. Walks through every folder under --data (your photos + friends' photos).
-2. For every image that has TOP or BOTTOM boxes:
-     - If a top exists but no "button" region was drawn  → add button = none
-     - If a top/bottom exists but no "pattern" region   → add pattern = plain
-3. Optionally writes the filled values back into the JSON files (--write).
-4. Shows a statistics report (terminal + a dashboard window):
+2. Cleans old / removed labels so the model never sees them:
+     - Drops bottom "waist" boxes
+     - Clears invalid values (bootcut, bottom cropped, …)
+3. Auto-fills absence classes:
+     - If a top exists but no "button" region  → button = none
+     - If a top/bottom exists but no "pattern" → pattern = plain
+4. Optionally writes the cleaned data back into the JSON files (--write).
+5. Shows a statistics report (terminal + a dashboard window):
      - How many of each attribute value (crew, plain, none, skinny, ...)
      - How many images / instances
      - Warnings about classes that are too rare (risk of underfitting)
@@ -19,7 +22,7 @@ Usage
     # Just see the report (does not change any files)
     python prepare_data.py --data ../data
 
-    # Apply the auto-fill and save back into the JSONs
+    # Apply cleaning + auto-fill and save back into the JSONs
     python prepare_data.py --data ../data --write
 
     # Then build the dataset as usual
@@ -38,9 +41,17 @@ ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = ROOT.parent / "annotate" / "labeling_config" / "schema.yaml"
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 
+# Regions / values that used to exist but must never reach training
+REMOVED_BOTTOM_REGIONS = {"waist"}
+REMOVED_VALUES = {
+    ("bottom", "length"): {"cropped"},
+    ("bottom", "fit"): {"bootcut"},
+    ("bottom", "waist"): {"low_waist", "high_waist"},
+}
+
 
 def load_schema():
-    return yaml.safe_load(SCHEMA_PATH.read_text("utf-8"))
+    return yaml.safe_load(SCHEMA_PATH.read_text("utf-8")) or {}
 
 
 def find_image(jp: Path):
@@ -51,51 +62,86 @@ def find_image(jp: Path):
     return None
 
 
-def auto_fill(objects: list) -> tuple[list, list]:
+def clean_objects(objects: list, schema: dict) -> tuple[list, list]:
     """
-    Apply the absence rules and return (new_objects, list_of_changes).
-    Rules:
-      - top exists + no button region  → button = none
-      - top or bottom exists + no pattern region → pattern = plain
+    1. Drop removed regions (e.g. bottom.waist).
+    2. Drop / fix invalid attribute values (bootcut, cropped on bottoms…).
+    3. Auto-fill absence classes:
+         - top exists + no button region  → button = none
+         - top/bottom exists + no pattern → pattern = plain
+    Returns (new_objects, list_of_change_strings).
     """
     changes = []
-    has_top = any(o.get("cls") == "top" for o in objects)
-    has_bottom = any(o.get("cls") == "bottom" for o in objects)
+    allowed_attrs = schema.get("attributes", {})
+    allowed_regions = {
+        "top": {"length", "button", "neck", "pattern", "sleeve_left", "sleeve_right"},
+        "bottom": {"length", "pattern", "fit"},
+    }
 
-    # Collect which regions already exist
-    top_regions = {o.get("region") for o in objects if o.get("cls") == "top"}
-    bottom_regions = {o.get("region") for o in objects if o.get("cls") == "bottom"}
+    cleaned = []
+    for o in objects:
+        cls = o.get("cls")
+        region = o.get("region")
+        attrs = dict(o.get("attrs") or {})
 
-    new_objects = list(objects)  # shallow copy
+        # Drop entire region boxes that no longer exist in the schema
+        if cls == "bottom" and region in REMOVED_BOTTOM_REGIONS:
+            changes.append(f"removed bottom.{region} box")
+            continue
+        if cls in allowed_regions and region and region not in allowed_regions[cls]:
+            changes.append(f"removed unknown {cls}.{region} box")
+            continue
 
-    # --- button: none ---
-    if has_top and "button" not in top_regions:
-        # Re-use the length box geometry if available, otherwise a dummy center box
-        ref = next((o for o in objects if o.get("cls") == "top" and o.get("region") == "length"), None)
+        # Clean attribute values
+        new_attrs = {}
+        for attr, value in attrs.items():
+            if not value:
+                continue
+            allowed = set(allowed_attrs.get(cls, {}).get(attr, []))
+            removed = REMOVED_VALUES.get((cls, attr), set())
+            if value in removed or (allowed and value not in allowed):
+                changes.append(f"cleared invalid {cls}.{attr}={value}")
+                continue
+            new_attrs[attr] = value
+
+        cleaned.append({
+            "cls": cls,
+            **({"region": region} if region else {}),
+            "box": o.get("box"),
+            "attrs": new_attrs,
+        })
+
+    # --- auto-fill absence classes on the cleaned list ---
+    has_top = any(o.get("cls") == "top" for o in cleaned)
+    has_bottom = any(o.get("cls") == "bottom" for o in cleaned)
+    top_regions = {o.get("region") for o in cleaned if o.get("cls") == "top"}
+    bottom_regions = {o.get("region") for o in cleaned if o.get("cls") == "bottom"}
+
+    def _ref_box(cls, prefer_region="length"):
+        ref = next((o for o in cleaned if o.get("cls") == cls and o.get("region") == prefer_region), None)
         if ref is None:
-            ref = next((o for o in objects if o.get("cls") == "top"), None)
+            ref = next((o for o in cleaned if o.get("cls") == cls), None)
+        return list(ref["box"]) if ref and ref.get("box") else None
 
-        if ref is not None:
-            box = list(ref["box"])  # copy
-            # Make the auto button box a bit smaller and centered on the chest
+    # button = none
+    if has_top and "button" not in top_regions:
+        box = _ref_box("top")
+        if box:
             cx, cy, w, h = box
-            box = [cx, cy - h * 0.15, w * 0.35, h * 0.25]
-            new_objects.append({
+            small = [cx, cy - h * 0.15, w * 0.35, h * 0.25]
+            cleaned.append({
                 "cls": "top",
                 "region": "button",
-                "box": [round(x, 6) for x in box],
+                "box": [round(x, 6) for x in small],
                 "attrs": {"button": "none"},
             })
             changes.append("added top.button = none")
 
-    # --- pattern: plain (tops) ---
+    # pattern = plain (tops)
     if has_top and "pattern" not in top_regions:
-        ref = next((o for o in objects if o.get("cls") == "top" and o.get("region") == "length"), None)
-        if ref is None:
-            ref = next((o for o in objects if o.get("cls") == "top"), None)
-        if ref is not None:
-            box = list(ref["box"])
-            new_objects.append({
+        box = _ref_box("top")
+        if box:
+            cleaned.append({
                 "cls": "top",
                 "region": "pattern",
                 "box": [round(x, 6) for x in box],
@@ -103,14 +149,11 @@ def auto_fill(objects: list) -> tuple[list, list]:
             })
             changes.append("added top.pattern = plain")
 
-    # --- pattern: plain (bottoms) ---
+    # pattern = plain (bottoms)
     if has_bottom and "pattern" not in bottom_regions:
-        ref = next((o for o in objects if o.get("cls") == "bottom" and o.get("region") == "length"), None)
-        if ref is None:
-            ref = next((o for o in objects if o.get("cls") == "bottom"), None)
-        if ref is not None:
-            box = list(ref["box"])
-            new_objects.append({
+        box = _ref_box("bottom")
+        if box:
+            cleaned.append({
                 "cls": "bottom",
                 "region": "pattern",
                 "box": [round(x, 6) for x in box],
@@ -118,7 +161,7 @@ def auto_fill(objects: list) -> tuple[list, list]:
             })
             changes.append("added bottom.pattern = plain")
 
-    return new_objects, changes
+    return cleaned, changes
 
 
 def collect_stats(objects: list, stats: dict):
@@ -138,11 +181,11 @@ def collect_stats(objects: list, stats: dict):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Auto-fill none/plain and report dataset statistics")
+    ap = argparse.ArgumentParser(description="Clean labels, auto-fill none/plain, report dataset statistics")
     ap.add_argument("--data", default=str(ROOT.parent / "data"),
                     help="Root folder that contains all labeled photos (yours + friends)")
     ap.add_argument("--write", action="store_true",
-                    help="Actually write the auto-filled values back into the JSON files")
+                    help="Actually write the cleaned values back into the JSON files")
     ap.add_argument("--min-count", type=int, default=30,
                     help="Warn if any attribute value has fewer than this many instances")
     ap.add_argument("--cli", action="store_true",
@@ -179,7 +222,7 @@ def main():
 
         stats["images"] += 1
         objects = meta["objects"]
-        new_objects, changes = auto_fill(objects)
+        new_objects, changes = clean_objects(objects, schema)
 
         if changes:
             stats["auto_filled"] += len(changes)
@@ -189,7 +232,7 @@ def main():
                 meta["objects"] = new_objects
                 jp.write_text(json.dumps(meta, indent=1), "utf-8")
 
-        # Always report stats *after* the auto-fill rules are applied
+        # Always report stats *after* cleaning + auto-fill
         collect_stats(new_objects, stats)
 
     # ---------- build report text (terminal + "Full text" tab) ----------
@@ -202,8 +245,8 @@ def main():
     add("  DATASET PREPARATION REPORT")
     add("=" * 64)
     add(f"  Images scanned              : {stats['images']}")
-    add(f"  Files that needed auto-fill : {stats['files_changed']}")
-    add(f"  Auto-fill actions           : {stats['auto_filled']}")
+    add(f"  Files that needed changes   : {stats['files_changed']}")
+    add(f"  Clean / auto-fill actions   : {stats['auto_filled']}")
     if args.write:
         add("  Mode                        : WRITE (JSON files were updated)")
     else:
@@ -213,10 +256,10 @@ def main():
 
     all_attrs = schema.get("attributes", {})
     warnings = []
-    attr_groups = []  # structured copy of the counts for the dashboard
+    attr_groups = []
 
     add("─" * 64)
-    add("  ATTRIBUTE COUNTS (after auto-fill)")
+    add("  ATTRIBUTE COUNTS (after cleaning + auto-fill)")
     add("─" * 64)
 
     for cls in ("top", "bottom"):
@@ -265,7 +308,7 @@ def main():
 
     if changes_log:
         add("\n" + "─" * 64)
-        add("  Examples of auto-fill actions")
+        add("  Examples of clean / auto-fill actions")
         add("─" * 64)
         for jp, ch in changes_log[:12]:
             try:
@@ -280,10 +323,10 @@ def main():
 
     add("\n" + "=" * 64)
     if not args.write and stats["files_changed"]:
-        add("  Next step: run again with --write to apply the auto-fill,")
+        add("  Next step: run again with --write to apply the changes,")
         add("  then run:  python build_dataset.py neck_crew --data ../data")
     elif args.write:
-        add("  Auto-fill applied. You can now run:")
+        add("  Cleaning applied. You can now run:")
         add("      python build_dataset.py neck_crew --data ../data")
     add("=" * 64)
 
@@ -299,7 +342,7 @@ def main():
             rel = str(jp.relative_to(data_root))
         except ValueError:
             rel = str(jp)
-        changes_rows.append((rel, ", ".join(c.replace("added ", "") for c in ch)))
+        changes_rows.append((rel, ", ".join(ch)))
 
     ui_data = {
         "images": stats["images"],
@@ -314,7 +357,6 @@ def main():
         "data_root": str(data_root),
     }
 
-    # Show dashboard window (unless --cli was requested)
     if not args.cli:
         show_popup(ui_data, report_text)
 
@@ -323,8 +365,6 @@ def main():
 #  Dashboard UI
 # ════════════════════════════════════════════════════════════════════
 
-# One calm palette: cool greys, a single steel-blue accent, a red reserved
-# strictly for "this class is too rare", and green/amber only for the mode badge.
 C = {
     "bg": "#eef1f5",
     "card": "#ffffff",
@@ -380,7 +420,6 @@ def show_popup(data: dict, report_text: str):
     root.minsize(700, 520)
     root.configure(bg=C["bg"])
 
-    # ---- ttk styling ----
     st = ttk.Style(root)
     try:
         st.theme_use("clam")
@@ -420,7 +459,7 @@ def show_popup(data: dict, report_text: str):
     ttk.Label(left, text=data["data_root"], font=F["small"], foreground=C["muted"]).pack(anchor="w", pady=(2, 0))
 
     if data["wrote"]:
-        badge_text, badge_bg, badge_fg = "Auto-fill applied", C["ok_bg"], C["ok_fg"]
+        badge_text, badge_bg, badge_fg = "Changes applied", C["ok_bg"], C["ok_fg"]
         hint = "JSON files were updated."
     else:
         badge_text, badge_bg, badge_fg = "Preview only", C["warn_bg"], C["warn_fg"]
@@ -436,8 +475,8 @@ def show_popup(data: dict, report_text: str):
     n_low = len(data["warnings"])
     tile_defs = [
         ("Images scanned", data["images"], None),
-        ("Files needing auto-fill", data["files_changed"], None),
-        ("Auto-fill actions", data["auto_filled"], None),
+        ("Files needing changes", data["files_changed"], None),
+        ("Clean / auto-fill actions", data["auto_filled"], None),
         (f"Classes under {data['min_count']}", n_low, C["low"] if n_low else C["ok_fg"]),
     ]
     for i, (label, value, color) in enumerate(tile_defs):
@@ -459,8 +498,6 @@ def show_popup(data: dict, report_text: str):
         return outer
 
     class Scrollable(tk.Frame):
-        """Vertically scrollable container (mouse wheel works)."""
-
         def __init__(self, parent):
             super().__init__(parent, bg=C["card"])
             self.canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0)
@@ -494,8 +531,6 @@ def show_popup(data: dict, report_text: str):
                 w.destroy()
 
     class Bar(tk.Canvas):
-        """A single horizontal bar with an optional threshold tick."""
-
         def __init__(self, parent, value, scale, low, threshold):
             super().__init__(parent, height=16, bg=C["card"], highlightthickness=0, bd=0)
             self.value, self.scale, self.low, self.threshold = value, scale, low, threshold
@@ -508,8 +543,9 @@ def show_popup(data: dict, report_text: str):
             if self.value:
                 bw = max(3, int(w * min(self.value / self.scale, 1.0)))
                 self.create_rectangle(0, 4, bw, 12, fill=C["low"] if self.low else C["accent"], width=0)
-            tx = int(w * min(self.threshold / self.scale, 1.0))
-            self.create_line(tx, 1, tx, 15, fill=C["muted"], dash=(2, 2))
+            if self.threshold:
+                tx = int(w * min(self.threshold / self.scale, 1.0))
+                self.create_line(tx, 1, tx, 15, fill=C["muted"], dash=(2, 2))
 
     # ---------- Tab 1: attributes ----------
     t_attr = card_tab("Attributes")
@@ -518,11 +554,9 @@ def show_popup(data: dict, report_text: str):
     only_low = tk.BooleanVar(value=False)
     ttk.Label(toolbar, text=f"Dashed line marks the minimum of {data['min_count']}.",
               style="TLabel", background=C["card"], foreground=C["muted"], font=F["small"]).pack(side="left")
-    chk = ttk.Checkbutton(toolbar, text="Show only low-count classes", variable=only_low,
-                          command=lambda: render_attrs())
-    chk.configure(style="TCheckbutton")
     st.configure("Card.TCheckbutton", background=C["card"])
-    chk.configure(style="Card.TCheckbutton")
+    chk = ttk.Checkbutton(toolbar, text="Show only low-count classes", variable=only_low,
+                          command=lambda: render_attrs(), style="Card.TCheckbutton")
     chk.pack(side="right")
 
     attr_scroll = Scrollable(t_attr)
@@ -598,16 +632,16 @@ def show_popup(data: dict, report_text: str):
             tk.Label(row, text=f"{n:,}", bg=C["card"], font=F["base"], width=7, anchor="e").grid(
                 row=0, column=2, padx=(4, 8))
 
-    # ---------- Tab 3: auto-fill changes ----------
-    t_chg = card_tab(f"Auto-fill changes ({len(data['changes'])})")
+    # ---------- Tab 3: changes ----------
+    t_chg = card_tab(f"Changes ({len(data['changes'])})")
     if data["changes"]:
         tv_frame = ttk.Frame(t_chg, style="Card.TFrame")
         tv_frame.pack(fill="both", expand=True, padx=8, pady=8)
         tv = ttk.Treeview(tv_frame, columns=("file", "change"), show="headings", selectmode="browse")
         tv.heading("file", text="File", anchor="w")
-        tv.heading("change", text="What was added", anchor="w")
-        tv.column("file", width=480, anchor="w")
-        tv.column("change", width=300, anchor="w")
+        tv.heading("change", text="What changed", anchor="w")
+        tv.column("file", width=420, anchor="w")
+        tv.column("change", width=360, anchor="w")
         sb = ttk.Scrollbar(tv_frame, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
         tv.pack(side="left", fill="both", expand=True)
@@ -615,8 +649,7 @@ def show_popup(data: dict, report_text: str):
         for rel, ch in data["changes"]:
             tv.insert("", "end", values=(rel, ch))
     else:
-        tk.Label(t_chg, text="Nothing needed auto-filling. Every top and bottom already has its\n"
-                             "button and pattern regions.",
+        tk.Label(t_chg, text="Nothing needed cleaning or auto-filling.",
                  bg=C["card"], fg=C["muted"], font=F["base"], justify="center").pack(pady=48)
 
     # ---------- Tab 4: full text ----------

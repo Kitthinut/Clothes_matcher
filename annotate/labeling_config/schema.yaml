@@ -1,6 +1,8 @@
 # Schema for raja_fashion labels.
 # Every object has: cls, region (for attribute-specific boxes), box [xc, yc, w, h] (normalized 0-1), attrs {}
 
+version: 1
+
 classes:
   - top
   - bottom

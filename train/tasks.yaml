@@ -1,8 +1,60 @@
-# Progressive tasks. Start with one attribute, then expand.
-# mode: "detect" = YOLO detection (one class per attribute value)
-#        "cls"    = classification on cropped boxes (good for attributes)
+# Progressive tasks matched to what you currently have labeled.
+# mode: "detect" = YOLO detection (box + class)
+#        "cls"    = classification on cropped boxes
 
-# ---- Phase 1: test single attributes first ----
+# ── What you can train NOW (enough data) ──────────────────────────
+
+# Top neck: only crew + polo are labeled so far
+neck_type:
+  mode: detect
+  object: top
+  attribute: neck
+  classes:
+    crew: [crew]
+    polo: [polo]
+  model: yolo11n.pt
+  imgsz: 640
+  rect: true
+
+# Top sleeve length: short + long only (camis / sleeveless = 0)
+sleeve_length:
+  mode: detect
+  object: top
+  attribute: sleeve
+  classes:
+    short: [short]
+    long: [long]
+  model: yolo11n.pt
+  imgsz: 640
+  rect: true
+
+# Bottom length
+bottom_length:
+  mode: detect
+  object: bottom
+  attribute: length
+  classes:
+    long: [long]
+    short: [short]
+  model: yolo11n.pt
+  imgsz: 640
+  rect: true
+
+# Bottom fit: only skinny + baggy labeled (straight = 0)
+bottom_fit:
+  mode: detect
+  object: bottom
+  attribute: fit
+  classes:
+    skinny: [skinny]
+    baggy: [baggy]
+  model: yolo11n.pt
+  imgsz: 640
+  rect: true
+
+# ── Legacy / future (need more labels first) ──────────────────────
+
+# Binary crew vs everything else (optional)
 neck_crew:
   mode: detect
   object: top
@@ -11,9 +63,11 @@ neck_crew:
     crew: [crew]
     not_crew: [v, polo, square, off_shoulder]
   else: not_crew
-  model: yolo11n.pt          # or yolo26n.pt when available
+  model: yolo11n.pt
   imgsz: 640
+  rect: true
 
+# Needs top length boxes first (you currently have 0)
 top_length:
   mode: detect
   object: top
@@ -23,55 +77,4 @@ top_length:
     cropped: [cropped]
   model: yolo11n.pt
   imgsz: 640
-
-bottom_fit:
-  mode: detect
-  object: bottom
-  attribute: fit
-  classes:
-    skinny: [skinny]
-    straight: [straight]
-    baggy: [baggy]
-  model: yolo11n.pt
-  imgsz: 640
-
-# ---- Full multi-class detection ----
-tops_full:
-  mode: detect
-  objects: [top]
-  # class names become the combination of attributes or just "top"
-  # For simplicity we keep a single "top" class and rely on attributes later
-  model: yolo11n.pt
-  imgsz: 640
-
-bottoms_full:
-  mode: detect
-  objects: [bottom]
-  model: yolo11n.pt
-  imgsz: 640
-
-# ---- Classification tasks (crop the region, classify attribute) ----
-neck_cls:
-  mode: cls
-  object: top
-  attribute: neck
-  classes:
-    crew: [crew]
-    v: [v]
-    polo: [polo]
-    square: [square]
-    off_shoulder: [off_shoulder]
-  model: yolo11n-cls.pt
-  imgsz: 224
-
-sleeve_cls:
-  mode: cls
-  object: top
-  attribute: sleeve
-  classes:
-    short: [short]
-    long: [long]
-    camis: [camis]
-    sleeveless: [sleeveless]
-  model: yolo11n-cls.pt
-  imgsz: 224
+  rect: true
