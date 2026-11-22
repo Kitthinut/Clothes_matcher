@@ -26,7 +26,7 @@ A complete open-source pipeline:
 
 ```
 raja_fashion/
-├── annotate/                  # Labeling tools (send this folder to friends)
+├── annotate/                  # Labeling tools (helpers will get this folder)
 │   ├── check_photos.py        # Size + 4:3 ratio gate
 │   ├── label.py               # Main labeling GUI
 │   ├── validate.py            # Schema checker before you merge data
