@@ -3,6 +3,8 @@ data/
 annotate/**/delete/
 annotate/**/originals_before_4x3/
 train/datasets/
+search/database
+predicts/
 train/runs/
 search/snapshot_*.jpg
 *.pt

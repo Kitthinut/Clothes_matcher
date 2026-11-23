@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """
-Search your closet for clothes that match a reference photo.
+Find clothes in your local database that match a reference photo.
 
-Workflow
-  1. Run the trained YOLO model on the reference image → get attribute tags
-     (neck=crew, length=regular, sleeve=short, …) + dominant colors.
-  2. Look up the local closet database (JSON or folder of labeled images).
-  3. Rank by attribute match score + color similarity.
-  4. Show the top matches.
+Database layout (required)
+--------------------------
+    search/database/
+        top/       ← top images (+ optional .json labels)
+        bottom/    ← bottom images (+ optional .json labels)
+
+How ranking works
+-----------------
+1. Run your selected YOLO model(s) on the reference image → set of labels
+   e.g. {crew, short, skinny, long}
+2. For each image in database/top and database/bottom:
+     - use sidecar .json attributes if present, else run the same models
+3. Score = how many labels match (plus optional color boost)
+4. Show the highest-scoring images
 
 Usage
+-----
     python search.py path/to/reference.jpg
-    python search.py path/to/reference.jpg --db ../data/closet --top 8
-    python search.py path/to/reference.jpg --weights ../train/runs/neck_crew/weights/best.pt
+    python search.py path/to/reference.jpg --db database --top 8
+    python search.py path/to/reference.jpg --weights ../train/runs/neck_type/weights/best.pt
+    python search.py path/to/reference.jpg --all --cls top
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 from ultralytics import YOLO
@@ -27,103 +38,127 @@ from color_detect import dominant_colors
 
 ROOT = Path(__file__).resolve().parent
 TRAIN = ROOT.parent / "train"
-IMG_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+DEFAULT_DB = ROOT / "database"
+IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
-def load_closet(db_path: Path):
+# ── database loading ──────────────────────────────────────────────
+
+
+def find_image_for_json(jp: Path) -> Path | None:
+    for e in IMG_EXT:
+        for cand in (jp.with_suffix(e), jp.with_suffix(e.upper())):
+            if cand.exists():
+                return cand
+    return None
+
+
+def tags_from_json(meta: dict) -> tuple[str | None, dict]:
+    """Aggregate attrs from annotation JSON → (cls, tags)."""
+    tags = {}
+    cls = None
+    for o in meta.get("objects", []):
+        c = o.get("cls")
+        if c in ("top", "bottom"):
+            cls = c
+        for k, v in (o.get("attrs") or {}).items():
+            if v:
+                tags[k] = str(v)
+                tags[str(v)] = str(v)  # also index by value for YOLO class-name match
+    return cls, tags
+
+
+def tags_from_models(models: list, image_path: Path, conf: float) -> dict:
+    """Run models on an image; return flat set of class names → conf."""
+    tags = {}
+    for model in models:
+        results = model.predict(str(image_path), conf=conf, verbose=False)
+        for r in results:
+            if r.boxes is None:
+                continue
+            for b in r.boxes:
+                name = r.names[int(b.cls)]
+                score = float(b.conf)
+                if name not in tags or score > tags[name]:
+                    tags[name] = score
+    return tags
+
+
+def load_database(db_path: Path, models: list | None, conf: float, run_models_on_db: bool):
     """
-    Closet can be:
-      - a folder of images + sidecar .json (same format as annotation)
-      - a single closet.json list of items
+    Load items from database/top and database/bottom.
 
-    Returns list of dicts:
-      {path, cls, tags: {attr: value}, colors: [{name, hex, pct}, ...]}
+    Each item:
+      {path, cls, tags: {label: score_or_1.0}, colors: [...]}
     """
     items = []
-
-    # Option 1: single closet.json
-    closet_json = db_path / "closet.json"
-    if closet_json.exists():
-        raw = json.loads(closet_json.read_text("utf-8"))
-        for it in raw:
-            if "colors" not in it and "path" in it:
-                it["colors"] = dominant_colors(it["path"], top_k=3)
-            items.append(it)
-        return items
-
-    # Option 2: folder of image + .json pairs
-    for jp in sorted(db_path.rglob("*.json")):
-        if jp.name in ("contributor.json", "closet.json"):
+    for sub in ("top", "bottom"):
+        folder = db_path / sub
+        if not folder.is_dir():
             continue
-        try:
-            meta = json.loads(jp.read_text("utf-8"))
-        except Exception:
-            continue
-
-        img = None
-        for e in IMG_EXT:
-            cand = jp.with_suffix(e)
-            if cand.exists():
-                img = cand
-                break
-            cand = jp.with_suffix(e.upper())
-            if cand.exists():
-                img = cand
-                break
-        if img is None:
-            continue
-
-        # Aggregate attributes from all region boxes of the same garment
-        tags = {}
-        cls = None
-        for o in meta.get("objects", []):
-            c = o.get("cls")
-            if c in ("top", "bottom"):
-                cls = c
-            for k, v in (o.get("attrs") or {}).items():
-                if v:
-                    tags[k] = v          # last value wins (normally only one)
-
-        colors = dominant_colors(img, top_k=3)
-        items.append({
-            "path": str(img),
-            "cls": cls,
-            "tags": tags,
-            "colors": colors,
-        })
+        for img in sorted(folder.iterdir()):
+            if img.suffix.lower() not in IMG_EXT:
+                continue
+            jp = img.with_suffix(".json")
+            cls = sub
+            tags = {}
+            if jp.exists():
+                try:
+                    meta = json.loads(jp.read_text("utf-8"))
+                    jcls, tags = tags_from_json(meta)
+                    if jcls:
+                        cls = jcls
+                except Exception:
+                    pass
+            # Fill / override with live model predictions if requested or no tags
+            if models and (run_models_on_db or not tags):
+                pred = tags_from_models(models, img, conf)
+                for k, v in pred.items():
+                    tags[k] = v
+            # Normalize: presence tags for scoring (value names like crew, short)
+            flat = {}
+            for k, v in tags.items():
+                flat[str(k)] = float(v) if isinstance(v, (int, float)) else 1.0
+                if not isinstance(v, (int, float)) and str(v) not in flat:
+                    flat[str(v)] = 1.0
+            try:
+                colors = dominant_colors(img, top_k=3)
+            except Exception:
+                colors = []
+            items.append({
+                "path": str(img.resolve()),
+                "cls": cls,
+                "tags": flat,
+                "colors": colors,
+            })
     return items
 
 
-def detect_attributes(model, image_path: Path, conf: float = 0.25):
-    """
-    Run YOLO and return:
-      - tags: dict of detected class names → confidence
-      - boxes: list of {name, conf, xyxy}
-    """
-    results = model.predict(str(image_path), conf=conf, verbose=False)
+# ── scoring ───────────────────────────────────────────────────────
+
+
+def detect_reference(models: list, image_path: Path, conf: float):
     tags = {}
     boxes = []
-    for r in results:
-        if r.boxes is None:
-            continue
-        names = r.names
-        for b in r.boxes:
-            cls_id = int(b.cls)
-            name = names[cls_id]
-            conf_score = float(b.conf)
-            # keep highest confidence per class name
-            if name not in tags or conf_score > tags[name]:
-                tags[name] = conf_score
-            boxes.append({
-                "name": name,
-                "conf": conf_score,
-                "xyxy": [round(x, 1) for x in b.xyxy[0].tolist()],
-            })
+    for model in models:
+        results = model.predict(str(image_path), conf=conf, verbose=False)
+        for r in results:
+            if r.boxes is None:
+                continue
+            for b in r.boxes:
+                name = r.names[int(b.cls)]
+                score = float(b.conf)
+                if name not in tags or score > tags[name]:
+                    tags[name] = score
+                boxes.append({
+                    "name": name,
+                    "conf": score,
+                    "xyxy": [round(x, 1) for x in b.xyxy[0].tolist()],
+                })
     return tags, boxes
 
 
-def color_similarity(c1, c2):
-    """Overlap of named colors weighted by percentage."""
+def color_similarity(c1, c2) -> float:
     if not c1 or not c2:
         return 0.0
     n1 = {c["name"]: c["pct"] for c in c1}
@@ -134,123 +169,197 @@ def color_similarity(c1, c2):
     return sum(min(n1[n], n2[n]) for n in common)
 
 
-def attribute_score(query_tags: dict, item_tags: dict) -> float:
+def rank_items(query_tags: dict, query_colors: list, items: list, cls_filter: str | None):
     """
-    How well the item matches the detected tags.
-    Works with both:
-      - progressive models that output "crew" / "not_crew"
-      - full models that output attribute values
+    Score by number of shared labels (main) + color overlap (secondary).
+
+    match_count = how many query labels appear on the item
+    score = 0.75 * (match_count / max_labels) + 0.25 * color_sim
     """
-    if not query_tags:
-        return 0.5
+    q_labels = set(query_tags.keys())
+    if not q_labels:
+        return []
 
-    hits = 0
-    total = 0
-    for qname, qconf in query_tags.items():
-        total += 1
-        # direct match on attribute value stored in item
-        if qname in item_tags.values():
-            hits += 1
-            continue
-        # match on key (e.g. model said "crew" and item has neck=crew)
-        if qname in item_tags:
-            hits += 1
-            continue
-        # progressive "not_xxx" handling
-        if qname.startswith("not_"):
-            real = qname[4:]
-            if real not in item_tags.values() and real not in item_tags:
-                hits += 0.6          # partial credit for correct rejection
-    return hits / max(total, 1)
-
-
-def rank(items, query_tags, query_colors, cls_filter=None):
+    max_labels = len(q_labels)
     scored = []
     for it in items:
-        if cls_filter and it.get("cls") and it["cls"] != cls_filter:
+        if cls_filter and it.get("cls") != cls_filter:
             continue
-        a_score = attribute_score(query_tags, it.get("tags") or {})
+        item_labels = set(it.get("tags") or {})
+        matched = q_labels & item_labels
+        match_count = len(matched)
+        if match_count == 0:
+            continue
+        a_score = match_count / max_labels
         c_score = color_similarity(query_colors, it.get("colors") or [])
-        # weighted combination – tweak these numbers if you want
-        score = 0.65 * a_score + 0.35 * c_score
-        scored.append((score, a_score, c_score, it))
-    scored.sort(key=lambda x: -x[0])
+        score = 0.75 * a_score + 0.25 * c_score
+        scored.append({
+            "score": score,
+            "match_count": match_count,
+            "matched": sorted(matched),
+            "a_score": a_score,
+            "c_score": c_score,
+            "item": it,
+        })
+    scored.sort(key=lambda x: (-x["match_count"], -x["score"]))
     return scored
 
 
-def find_default_weights():
-    candidates = [
-        TRAIN / "runs" / "neck_crew" / "weights" / "best.pt",
-        TRAIN / "runs" / "tops_full" / "weights" / "best.pt",
-        TRAIN / "runs" / "top_length" / "weights" / "best.pt",
-        TRAIN / "runs" / "bottom_fit" / "weights" / "best.pt",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
+# ── weights / models ──────────────────────────────────────────────
+
+
+def resolve_weights(cli_weights, use_all: bool = False):
+    sys.path.insert(0, str(TRAIN))
+    from select_models import find_all_weights, pick_models
+
+    if cli_weights:
+        return [Path(w) for w in cli_weights]
+    if use_all:
+        return find_all_weights(TRAIN / "runs")
+    selected = pick_models(title="Select models for closet search")
+    return selected or []
+
+
+# ── display ───────────────────────────────────────────────────────
+
+
+def show_results(ranked: list, top_n: int, query_tags: dict):
+    print("\n" + "=" * 60)
+    print("  SEARCH RESULTS")
+    print("=" * 60)
+    print(f"  Query labels : {', '.join(sorted(query_tags.keys())) or '(none)'}")
+    if not ranked:
+        print("\n  No matches. Add more images to database/top and database/bottom,")
+        print("  or lower --conf, or check that models detect labels on the reference.")
+        print("=" * 60)
+        return
+
+    print(f"  Showing top {min(top_n, len(ranked))} of {len(ranked)} matches\n")
+    for i, row in enumerate(ranked[:top_n], 1):
+        it = row["item"]
+        print(f"  #{i}  score={row['score']:.2f}  labels_matched={row['match_count']}")
+        print(f"      file     : {it['path']}")
+        print(f"      type     : {it.get('cls')}")
+        print(f"      matched  : {', '.join(row['matched'])}")
+        cols = it.get("colors") or []
+        if cols:
+            print(f"      colors   : {', '.join(c['name'] for c in cols[:3])}")
+        print()
+    print("=" * 60)
+
+
+def try_open_images(ranked: list, top_n: int):
+    """Optional OpenCV grid of top matches."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return
+
+    tiles = []
+    for row in ranked[:top_n]:
+        img = cv2.imread(row["item"]["path"])
+        if img is None:
+            continue
+        img = cv2.resize(img, (200, 260))
+        label = f"{row['match_count']} labels"
+        cv2.putText(img, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        tiles.append(img)
+    if not tiles:
+        return
+
+    # pad to rectangle
+    cols = min(4, len(tiles))
+    rows = (len(tiles) + cols - 1) // cols
+    while len(tiles) < rows * cols:
+        tiles.append(np.zeros_like(tiles[0]))
+    grid_rows = []
+    for r in range(rows):
+        grid_rows.append(np.hstack(tiles[r * cols:(r + 1) * cols]))
+    grid = np.vstack(grid_rows)
+    cv2.imshow("raja_fashion search – top matches", grid)
+    print("Press any key in the results window to close.")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+# ── main ──────────────────────────────────────────────────────────
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Find similar clothes in your closet")
+    ap = argparse.ArgumentParser(description="Search database/top & database/bottom for similar clothes")
     ap.add_argument("image", help="Reference fashion photo")
-    ap.add_argument("--db", default=str(ROOT.parent / "data" / "closet"),
-                    help="Folder of labeled closet items or closet.json")
-    ap.add_argument("--weights", default=None,
-                    help="Path to YOLO weights")
-    ap.add_argument("--top", type=int, default=6)
+    ap.add_argument(
+        "--db",
+        default=str(DEFAULT_DB),
+        help="Database root (must contain top/ and bottom/ subfolders)",
+    )
+    ap.add_argument("--weights", nargs="+", default=None, help="One or more best.pt")
+    ap.add_argument("--all", action="store_true", help="Use every trained model")
+    ap.add_argument("--top", type=int, default=8, help="How many results to show")
     ap.add_argument("--conf", type=float, default=0.25)
-    ap.add_argument("--cls", choices=["top", "bottom"], default=None,
-                    help="Only search tops or bottoms")
+    ap.add_argument("--cls", choices=["top", "bottom"], default=None, help="Only search that subfolder")
+    ap.add_argument(
+        "--scan-db",
+        action="store_true",
+        help="Also run models on database images (slower; use if DB has no JSON labels)",
+    )
+    ap.add_argument("--no-show", action="store_true", help="Text results only, no image window")
     args = ap.parse_args()
 
     img = Path(args.image)
     if not img.exists():
         sys.exit(f"Image not found: {img}")
 
-    weights = Path(args.weights) if args.weights else find_default_weights()
-    if weights is None or not weights.exists():
-        print("No trained weights found. Train a model first:")
-        print("  cd train")
-        print("  python build_dataset.py neck_crew --data ../data")
-        print("  python train.py neck_crew")
+    db = Path(args.db)
+    top_dir, bottom_dir = db / "top", db / "bottom"
+    if not top_dir.is_dir() and not bottom_dir.is_dir():
+        print(f"Database folders not found under: {db}")
+        print("Create:")
+        print(f"  {db}/top/")
+        print(f"  {db}/bottom/")
+        print("Put clothing photos in those folders (optional matching .json labels).")
+        # create empty structure for the user
+        top_dir.mkdir(parents=True, exist_ok=True)
+        bottom_dir.mkdir(parents=True, exist_ok=True)
         sys.exit(1)
 
-    print(f"Model   : {weights}")
-    model = YOLO(str(weights))
+    weight_paths = [p for p in resolve_weights(args.weights, args.all) if Path(p).exists()]
+    if not weight_paths:
+        print("No trained weights found. Train models first, then re-run search.")
+        sys.exit(1)
 
-    print(f"Image   : {img.name}")
-    tags, boxes = detect_attributes(model, img, conf=args.conf)
-    colors = dominant_colors(img, top_k=3)
+    print("Models:")
+    models = []
+    for w in weight_paths:
+        print(f"  {w}")
+        models.append(YOLO(str(w)))
 
-    print("Tags    :", {k: f"{v:.2f}" for k, v in tags.items()} or "(none)")
-    print("Colors  :", [f"{c['name']}({c['pct']:.0%})" for c in colors] or "(none)")
-    if boxes:
-        print("Boxes   :", len(boxes))
+    print(f"\nReference: {img}")
+    query_tags, boxes = detect_reference(models, img, conf=args.conf)
+    query_colors = dominant_colors(img, top_k=3)
 
-    db = Path(args.db)
-    if not db.exists():
-        print(f"\nCloset database not found at: {db}")
-        print("Put labeled images (or a closet.json) there and try again.")
-        sys.exit(0)
+    print("Detected labels:", ", ".join(f"{k}({v:.2f})" for k, v in sorted(query_tags.items())) or "(none)")
+    print("Colors:", ", ".join(c["name"] for c in query_colors) or "(none)")
+    if not query_tags:
+        print("\nNo labels detected on the reference image. Try lower --conf or different models.")
+        sys.exit(1)
 
-    items = load_closet(db)
-    print(f"Closet  : {len(items)} items")
+    print(f"\nScanning database: {db}")
+    items = load_database(db, models if args.scan_db else None, args.conf, args.scan_db)
+    # If DB images have no tags and user didn't pass --scan-db, auto-scan
+    if items and all(not it["tags"] for it in items):
+        print("Database items have no labels – running models on them (--scan-db).")
+        items = load_database(db, models, args.conf, run_models_on_db=True)
 
-    if not items:
-        print("No items loaded. Check that JSON files sit next to images.")
-        sys.exit(0)
+    print(f"  items indexed: {len(items)}  (top={sum(1 for i in items if i['cls']=='top')}, "
+          f"bottom={sum(1 for i in items if i['cls']=='bottom')})")
 
-    ranked = rank(items, tags, colors, cls_filter=args.cls)
+    ranked = rank_items(query_tags, query_colors, items, args.cls)
+    show_results(ranked, args.top, query_tags)
 
-    print(f"\nTop {min(args.top, len(ranked))} matches")
-    print("-" * 64)
-    for i, (score, a, c, it) in enumerate(ranked[:args.top], 1):
-        print(f"{i:2}.  score={score:.3f}   attr={a:.2f}  color={c:.2f}")
-        print(f"    {it['path']}")
-        print(f"    tags  = {it.get('tags')}")
-        print(f"    colors= {[x['name'] for x in it.get('colors', [])]}")
-        print()
+    if not args.no_show and ranked:
+        try_open_images(ranked, args.top)
 
 
 if __name__ == "__main__":
