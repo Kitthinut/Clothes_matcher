@@ -6,6 +6,7 @@ train/datasets/
 search/database
 predicts/
 train/runs/
+train/multi-models
 search/snapshot_*.jpg
 *.pt
 *.onnx

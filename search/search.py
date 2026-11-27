@@ -32,6 +32,7 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
 from ultralytics import YOLO
 
 from color_detect import dominant_colors
@@ -39,7 +40,48 @@ from color_detect import dominant_colors
 ROOT = Path(__file__).resolve().parent
 TRAIN = ROOT.parent / "train"
 DEFAULT_DB = ROOT / "database"
+SCHEMA = ROOT.parent / "annotate" / "labeling_config" / "schema.yaml"
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+# ── multi class-name mapping ───────────────────────────────────────
+
+
+def load_region_prefixes() -> list[str]:
+    """
+    Known prefixes from schema.yaml regions, longest first.
+
+    Both bare regions (neck, pattern, sleeve_left) and object-qualified
+    variants (top_neck, bottom_fit) are included, so a multi class name like
+    bottom_fit_skinny loses 'bottom_fit' rather than just 'fit'.
+    """
+    try:
+        schema = yaml.safe_load(SCHEMA.read_text(encoding="utf-8")) or {}
+    except Exception:
+        schema = {}
+    prefixes = set()
+    for obj, regions in (schema.get("regions") or {}).items():
+        for region in regions or []:
+            region = str(region)
+            prefixes.add(region)
+            prefixes.add(f"{obj}_{region}")
+    return sorted(prefixes, key=len, reverse=True)
+
+
+REGION_PREFIXES = load_region_prefixes()
+
+
+def value_tag(name) -> str:
+    """Map '<region>_<value>' multi class names to the plain attribute value.
+
+    Individual models already emit plain values (crew, long, skinny, ...)
+    and are returned unchanged. Max-confidence-per-tag is handled by callers.
+    """
+    text = str(name)
+    for prefix in REGION_PREFIXES:
+        if text.startswith(prefix + "_"):
+            return text[len(prefix) + 1:] or text
+    return text
 
 
 # ── database loading ──────────────────────────────────────────────
@@ -69,7 +111,13 @@ def tags_from_json(meta: dict) -> tuple[str | None, dict]:
 
 
 def tags_from_models(models: list, image_path: Path, conf: float) -> dict:
-    """Run models on an image; return flat set of class names → conf."""
+    """Run models on an image; return flat set of value tags → conf.
+
+    Works with a mix of individual models and the one multi-attribute model:
+    multi names such as neck_crew / bottom_fit_skinny are reduced to the plain
+    value (crew / skinny) so they match JSON sidecar tags. The best confidence
+    wins when several models predict the same value.
+    """
     tags = {}
     for model in models:
         results = model.predict(str(image_path), conf=conf, verbose=False)
@@ -77,7 +125,7 @@ def tags_from_models(models: list, image_path: Path, conf: float) -> dict:
             if r.boxes is None:
                 continue
             for b in r.boxes:
-                name = r.names[int(b.cls)]
+                name = value_tag(r.names[int(b.cls)])
                 score = float(b.conf)
                 if name not in tags or score > tags[name]:
                     tags[name] = score
@@ -138,6 +186,10 @@ def load_database(db_path: Path, models: list | None, conf: float, run_models_on
 
 
 def detect_reference(models: list, image_path: Path, conf: float):
+    """Return (value tags → best confidence, boxes) for a reference photo.
+
+    Boxes keep their raw class name plus the mapped value tag used for scoring.
+    """
     tags = {}
     boxes = []
     for model in models:
@@ -146,12 +198,14 @@ def detect_reference(models: list, image_path: Path, conf: float):
             if r.boxes is None:
                 continue
             for b in r.boxes:
-                name = r.names[int(b.cls)]
+                raw_name = r.names[int(b.cls)]
+                name = value_tag(raw_name)
                 score = float(b.conf)
                 if name not in tags or score > tags[name]:
                     tags[name] = score
                 boxes.append({
-                    "name": name,
+                    "name": raw_name,
+                    "tag": name,
                     "conf": score,
                     "xyxy": [round(x, 1) for x in b.xyxy[0].tolist()],
                 })
@@ -215,7 +269,8 @@ def resolve_weights(cli_weights, use_all: bool = False):
     if cli_weights:
         return [Path(w) for w in cli_weights]
     if use_all:
-        return find_all_weights(TRAIN / "runs")
+        # Extended selector: individual models + multi-models/multi.pt.
+        return find_all_weights()
     selected = pick_models(title="Select models for closet search")
     return selected or []
 

@@ -9,6 +9,10 @@ Re-run it any time you add or relabel data. The train/val/test split is decided 
 the file name, so an image never jumps between splits when the dataset grows (no leakage,
 and results stay comparable between runs).
 
+The default split is 70% train / 15% validation / 15% test. Train always gets whatever is
+left over (100 - val - test); override the percentages with --val / --test (val + test must
+stay below 100). Effective percentages are written to dataset_report.json as "split_percent".
+
 Expected input: any folder tree under --data containing  <name>.json + <name>.jpg/png/webp.
 JSON format: see annotate/labeling_config/schema.yaml
 """
@@ -28,8 +32,33 @@ SCHEMA_PATH = ROOT.parent / "annotate" / "labeling_config" / "schema.yaml"
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 SPLITS = ("train", "val", "test")
 
+# Single source of truth for the default dataset split policy (70/15/15).
+TRAIN_PCT = 70
+VAL_PCT = 15
+TEST_PCT = 15
 
-def split_of(key: str, val_pct: int, test_pct: int) -> str:
+
+def validate_split(val_pct: int, test_pct: int) -> int:
+    """Validate a split request and return the implied training percentage.
+
+    The default policy is 70% train / 15% val / 15% test. Train always receives
+    the remainder (100 - val - test), so val + test must be below 100. Keeping
+    this check here makes build_dataset.py, train_multi.py and
+    build_dataset_multi.py agree on what a valid split is.
+    """
+    if not isinstance(val_pct, int) or not isinstance(test_pct, int):
+        raise ValueError("split percentages must be integers")
+    if val_pct < 0 or test_pct < 0:
+        raise ValueError(f"split percentages must be non-negative (got val={val_pct}, test={test_pct})")
+    if val_pct + test_pct >= 100:
+        raise ValueError(
+            f"--val + --test must be < 100 (got {val_pct} + {test_pct} = "
+            f"{val_pct + test_pct}); the training split would be empty"
+        )
+    return 100 - val_pct - test_pct
+
+
+def split_of(key: str, val_pct: int = VAL_PCT, test_pct: int = TEST_PCT) -> str:
     h = int(hashlib.sha1(key.encode()).hexdigest(), 16) % 100
     if h < test_pct:
         return "test"
@@ -230,6 +259,7 @@ def pick_task_gui(tasks: dict) -> list[str] | None:
 def build_one(task_name: str, tasks: dict, schema: dict, data_dir: Path, out_root: Path,
               val_pct: int, test_pct: int, pad: float) -> bool:
     """Build dataset for a single task. Returns True if successful."""
+    train_pct = validate_split(val_pct, test_pct)
     task = Task(task_name, tasks[task_name])
     out = out_root / task_name
     if out.exists():
@@ -308,6 +338,7 @@ def build_one(task_name: str, tasks: dict, schema: dict, data_dir: Path, out_roo
             "names": dict(enumerate(task.names)),
         }, sort_keys=False))
     report = {"task": task.name, "mode": task.mode, "names": task.names,
+              "split_percent": {"train": train_pct, "val": val_pct, "test": test_pct},
               "images": dict(n_images), "instances": {s: dict(n_inst[s]) for s in SPLITS},
               "skipped": dict(skipped)}
     (out / "dataset_report.json").write_text(json.dumps(report, indent=2))
@@ -344,11 +375,18 @@ def main():
     ap.add_argument("--data", default=str(ROOT.parent / "data"),
                     help="folder with images + JSONs (searched recursively)")
     ap.add_argument("--out", default=str(ROOT / "datasets"))
-    ap.add_argument("--val", type=int, default=15, help="percent of images for validation")
-    ap.add_argument("--test", type=int, default=15, help="percent of images for test")
+    ap.add_argument("--val", type=int, default=VAL_PCT,
+                    help="percent of images for validation (default split: 70 train / 15 val / 15 test)")
+    ap.add_argument("--test", type=int, default=TEST_PCT,
+                    help="percent of images for test (default split: 70 train / 15 val / 15 test)")
     ap.add_argument("--pad", type=float, default=0.08, help="crop padding for cls mode")
     ap.add_argument("--cli", action="store_true", help="do not open the task picker popup")
     args = ap.parse_args()
+
+    try:
+        train_pct = validate_split(args.val, args.test)
+    except ValueError as exc:
+        sys.exit(f"Invalid split: {exc}")
 
     tasks = yaml.safe_load((ROOT / "tasks.yaml").read_text("utf-8"))
     schema = yaml.safe_load(SCHEMA_PATH.read_text("utf-8"))
@@ -368,6 +406,7 @@ def main():
     data_dir = Path(args.data)
     out_root = Path(args.out)
     print(f"Building {len(selected)} dataset(s): {', '.join(selected)}")
+    print(f"Split: train={train_pct}%  val={args.val}%  test={args.test}%  (hash-based)")
 
     all_ok = True
     for name in selected:

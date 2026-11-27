@@ -2,9 +2,9 @@
 """
 Train one or more tasks from tasks.yaml (after build_dataset.py).
 
-    python train.py                     # popup to choose task(s)
-    python train.py neck_crew
-    python train.py neck_crew top_length --epochs 150 --batch 8
+    python train_individual.py                     # popup to choose task(s)
+    python train_individual.py neck_crew
+    python train_individual.py neck_crew top_length --epochs 150 --batch 8
 
 Results: runs/<task>/  (weights/best.pt, results.csv, plots)
 

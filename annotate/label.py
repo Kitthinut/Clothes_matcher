@@ -134,6 +134,7 @@ class App:
         self.cur, self.jp, self.pil = None, None, None
         self.meta, self.objs, self.extra = {}, [], []
         self.sel, self.undo, self.drag = None, [], None
+        self.done_forced = set()   # photos manually marked done in the task tracker
         self.geom, self._photo, self._cache_key = (0, 0, 1, 1), None, None
         self.force_draw = False   # next drag draws a new box even on top of an existing one
         self._lock = False
@@ -212,6 +213,12 @@ class App:
             left,
             text="Next photo not done ⏭",
             command=self.next_todo,
+            style="Nav.TButton",
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            left,
+            text="✔ Done with this photo (toggle)",
+            command=self.toggle_done,
             style="Nav.TButton",
         ).pack(fill="x", pady=(6, 0))
         ttk.Button(
@@ -362,6 +369,7 @@ class App:
             messagebox.showinfo("No photos", f"No photos found in:\n{folder}")
             return
         self.folder, self.files = folder, files
+        self.done_forced.clear()
         self.folder_var.set(str(folder))
         self.cur = None
         self.recompute_status()
@@ -384,9 +392,23 @@ class App:
         except Exception:
             return []
 
+    def _read_meta(self, jp: Path):
+        try:
+            data = json.loads(jp.read_text("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
     def recompute_status(self):
+        self.done_forced.clear()
         for f in self.files:
-            self.status[f] = self.status_of(self.read_objs(f.with_suffix(".json")))
+            meta = self._read_meta(f.with_suffix(".json"))
+            if meta.get("done"):
+                self.done_forced.add(f)
+            self.status[f] = (
+                "done" if f in self.done_forced
+                else self.status_of(self.read_objs(f.with_suffix(".json")))
+            )
 
     def region_attribute(self, obj):
         cls = obj.get("cls")
@@ -468,6 +490,31 @@ class App:
             if self.status[self.files[i]] != "done":
                 return self.open_image(i)
         messagebox.showinfo("All done", "Every photo is done ✔")
+
+    def toggle_done(self):
+        """Mark the current photo done in the task tracker (or undo that mark).
+
+        The flag is stored as ``"done": true`` in the JSON sidecar, so it
+        survives reopening the folder even if some attribute boxes are empty.
+        """
+        if self.cur is None or not self.files:
+            return
+        f = self.files[self.cur]
+        if f in self.done_forced:
+            self.done_forced.discard(f)
+            self.meta.pop("done", None)
+            self.save()
+            self.status[f] = self.status_of(self.objs)
+            self.refresh_row(self.cur)
+            self.line.set("Marked not done")
+        else:
+            self.done_forced.add(f)
+            self.meta["done"] = True
+            self.save()
+            self.status[f] = "done"
+            self.refresh_row(self.cur)
+            self.line.set("✔ Marked done")
+            self.next_todo()
 
     def delete_photo(self):
         if self.cur is None:
@@ -593,13 +640,18 @@ class App:
         if not self.objs and not self.extra and not self.jp.exists():
             return  # just browsing: do not create empty label files
         meta = dict(self.meta)
+        current_file = self.files[self.cur]
         meta.update(
             {
-                "image": self.files[self.cur].name,
+                "image": current_file.name,
                 "schema_version": self.schema["version"],
                 "worn": self.worn.get(),
             }
         )
+        if current_file in self.done_forced:
+            meta["done"] = True
+        else:
+            meta.pop("done", None)
         meta["objects"] = [
             {
                 "cls": o["cls"],
@@ -611,7 +663,7 @@ class App:
         ] + self.extra
         self.jp.write_text(json.dumps(meta, indent=1), "utf-8")
         f = self.files[self.cur]
-        self.status[f] = self.status_of(self.objs)
+        self.status[f] = "done" if f in self.done_forced else self.status_of(self.objs)
         self.refresh_row(self.cur)
 
     def push_undo(self):

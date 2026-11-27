@@ -11,6 +11,9 @@ CLI:
     python select_models.py              # popup, print selected paths
     python select_models.py --cli        # list paths only, no GUI
 
+Weights come from runs/<task>/weights/best.pt (individual tasks) and
+train/multi-models/multi.pt (one multi-attribute model).
+
 Import:
     from select_models import pick_models, find_all_weights
     weights = pick_models()              # list[Path] or []
@@ -24,19 +27,41 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
+MULTI = ROOT / "multi-models"
+MULTI_WEIGHTS = MULTI / "multi.pt"
 
 
 def find_all_weights(runs_dir: Path | None = None) -> list[Path]:
-    """Return every runs/<task>/weights/best.pt that exists."""
-    base = runs_dir or RUNS
-    if not base.exists():
-        return []
-    return sorted(base.glob("*/weights/best.pt"))
+    """
+    Return every trained weight that exists:
+
+      - runs/<task>/weights/best.pt  (one model per individual task)
+      - multi-models/multi.pt        (one model covering all attributes)
+
+    The multi model is appended last, so the individual ordering stays stable.
+    """
+    base = Path(runs_dir) if runs_dir is not None else RUNS
+    individual = sorted(base.glob("*/weights/best.pt")) if base.exists() else []
+    weights = list(individual)
+    if MULTI_WEIGHTS.exists() and MULTI_WEIGHTS not in weights:
+        weights.append(MULTI_WEIGHTS)
+    return weights
 
 
 def task_name(weights: Path) -> str:
-    """runs/neck_type/weights/best.pt -> neck_type"""
+    """runs/neck_type/weights/best.pt -> neck_type; multi-models/multi.pt -> multi."""
+    weights = Path(weights)
+    if weights.name == "multi.pt":
+        return "multi"
     return weights.parent.parent.name
+
+
+def model_label(weights: Path) -> str:
+    """Popup label that makes individual models vs the one multi model obvious."""
+    task = task_name(weights)
+    if task == "multi":
+        return "multi (one model)"
+    return f"individual: {task}"
 
 
 def pick_models(
@@ -50,7 +75,8 @@ def pick_models(
     """
     found = weights if weights is not None else find_all_weights()
     if not found:
-        print("No weights found under train/runs/*/weights/best.pt")
+        print("No weights found under train/runs/*/weights/best.pt "
+              "or train/multi-models/multi.pt")
         return []
 
     try:
@@ -82,6 +108,11 @@ def pick_models(
         text="Ctrl/Cmd+click or Shift+click for multiple  ·  these models run together",
         foreground="#667085",
     ).pack(anchor="w", pady=(2, 0))
+    ttk.Label(
+        header,
+        text="individual: one model per task  ·  multi: ONE model covering all attributes",
+        foreground="#667085",
+    ).pack(anchor="w", pady=(2, 0))
 
     body = ttk.Frame(root, padding=(20, 8, 20, 8))
     body.pack(fill="both", expand=True)
@@ -105,7 +136,7 @@ def pick_models(
     sb.pack(side="left", fill="y")
 
     for w in found:
-        lb.insert("end", f"{task_name(w):20s}  {w}")
+        lb.insert("end", f"{model_label(w):<28s} {w}")
 
     if preselect_all:
         lb.selection_set(0, "end")
