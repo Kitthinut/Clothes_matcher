@@ -11,8 +11,9 @@ CLI:
     python select_models.py              # popup, print selected paths
     python select_models.py --cli        # list paths only, no GUI
 
-Weights come from runs/<task>/weights/best.pt (individual tasks) and
-train/multi-models/multi.pt (one multi-attribute model).
+Weights come from runs/<task>/weights/best.pt (individual tasks),
+train/multi-models/multi.pt (legacy multi-attribute model) and the versioned
+train/multi-models/model_vN.pt checkpoints (each with a model_vN.meta.json).
 
 Import:
     from select_models import pick_models, find_all_weights
@@ -22,6 +23,7 @@ Import:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -29,36 +31,64 @@ ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 MULTI = ROOT / "multi-models"
 MULTI_WEIGHTS = MULTI / "multi.pt"
+VERSION_PATTERN = re.compile(r"^model_v(\d+)$")
+
+
+def version_info(path_or_name) -> tuple[str, int] | None:
+    """('model_v1', 1) for a versioned weight path/name, else None."""
+    name = Path(str(path_or_name)).name
+    if name.lower().endswith(".pt"):
+        name = name[:-3]
+    match = VERSION_PATTERN.fullmatch(name)
+    return (match.group(0), int(match.group(1))) if match else None
+
+
+def is_version_name(path_or_name) -> bool:
+    """True for model_v0.pt / model_v0 / a path ending in model_v0.pt."""
+    return version_info(path_or_name) is not None
 
 
 def find_all_weights(runs_dir: Path | None = None) -> list[Path]:
     """
     Return every trained weight that exists:
 
-      - runs/<task>/weights/best.pt  (one model per individual task)
-      - multi-models/multi.pt        (one model covering all attributes)
+      - runs/<task>/weights/best.pt   (one model per individual task)
+      - multi-models/multi.pt         (legacy multi-attribute model)
+      - multi-models/model_vN.pt      (versioned multi checkpoints)
 
-    The multi model is appended last, so the individual ordering stays stable.
+    Individual ordering stays stable; legacy multi comes next and versioned
+    checkpoints are appended in ascending version order.
     """
     base = Path(runs_dir) if runs_dir is not None else RUNS
     individual = sorted(base.glob("*/weights/best.pt")) if base.exists() else []
     weights = list(individual)
     if MULTI_WEIGHTS.exists() and MULTI_WEIGHTS not in weights:
         weights.append(MULTI_WEIGHTS)
+    versioned = [p for p in MULTI.glob("model_v*.pt")
+                 if p.is_file() and is_version_name(p)]
+    versioned.sort(key=lambda p: (version_info(p)[1], str(p).lower()))
+    for path in versioned:
+        if path not in weights:
+            weights.append(path)
     return weights
 
 
 def task_name(weights: Path) -> str:
-    """runs/neck_type/weights/best.pt -> neck_type; multi-models/multi.pt -> multi."""
+    """runs/neck_type/weights/best.pt -> neck_type; model_v1.pt -> model_v1; multi.pt -> multi."""
     weights = Path(weights)
+    info = version_info(weights)
+    if info is not None:
+        return info[0]
     if weights.name == "multi.pt":
         return "multi"
     return weights.parent.parent.name
 
 
 def model_label(weights: Path) -> str:
-    """Popup label that makes individual models vs the one multi model obvious."""
+    """Popup label: versioned multi / legacy multi / individual."""
     task = task_name(weights)
+    if is_version_name(task):
+        return f"versioned multi: {task}"
     if task == "multi":
         return "multi (one model)"
     return f"individual: {task}"
@@ -75,8 +105,8 @@ def pick_models(
     """
     found = weights if weights is not None else find_all_weights()
     if not found:
-        print("No weights found under train/runs/*/weights/best.pt "
-              "or train/multi-models/multi.pt")
+        print("No weights found under train/runs/*/weights/best.pt, "
+              "train/multi-models/multi.pt or train/multi-models/model_v*.pt")
         return []
 
     try:
@@ -110,7 +140,7 @@ def pick_models(
     ).pack(anchor="w", pady=(2, 0))
     ttk.Label(
         header,
-        text="individual: one model per task  ·  multi: ONE model covering all attributes",
+        text="individual: one model per task  ·  multi/versioned: ONE model covering all attributes",
         foreground="#667085",
     ).pack(anchor="w", pady=(2, 0))
 

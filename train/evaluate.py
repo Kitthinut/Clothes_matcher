@@ -2,11 +2,19 @@
 """
 Is the model overfitting, underfitting, or about right? And how accurate is it?
 
+    python evaluate.py                             # popup picker (default: TEST split)
     python evaluate.py neck_crew
     python evaluate.py neck_crew --weights runs/neck_crew/weights/best.pt --split test
+    python evaluate.py multi                       # legacy multi.pt via config.json
+    python evaluate.py model_v1                    # versioned multi checkpoint
+    python evaluate.py --models model_v1,model_v0  # compare versions
+    python evaluate.py --all                       # every trained model
+    python evaluate.py --cli                       # list available models, no GUI
 
 Reads  runs/<task>/results.csv  (training curves) and re-scores the model on the
-train / val / test splits built by build_dataset.py.
+train / val / test splits built by build_dataset.py. For a versioned model the
+class list, dataset path and weights come from
+train/multi-models/model_vN.meta.json (no tasks.yaml entry required).
 Writes runs/<task>/evaluation/report.json and curves.png.
 
 The verdict uses simple rules of thumb (thresholds at the top of the file), not a
@@ -29,7 +37,13 @@ import yaml
 from PIL import Image
 from ultralytics import YOLO
 
-from select_models import find_all_weights, model_label, pick_models, task_name
+from select_models import (
+    find_all_weights,
+    is_version_name,
+    model_label,
+    pick_models,
+    task_name,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT.parent / "data"
@@ -82,6 +96,71 @@ Train-val gap= train_score - val_score  (overfit if > 0.15 detect / > 0.08 cls)
 """
 
 
+def format_score(score) -> str:
+    """Readable one-line score (all metrics stay in the JSON report)."""
+    if not isinstance(score, dict):
+        return "n/a"
+    parts = []
+    for key, label in (("accuracy", "accuracy"), ("map50", "mAP50"),
+                       ("map50_95", "mAP50-95"), ("precision", "P"),
+                       ("recall", "R")):
+        if score.get(key) is not None:
+            parts.append(f"{label} {float(score[key]):.3f}")
+    if score.get("n") is not None:
+        parts.append(f"n={score['n']}")
+    if score.get("ci95"):
+        lo, hi = score["ci95"]
+        parts.append(f"95% CI {lo:.3f}-{hi:.3f}")
+    return " | ".join(parts) if parts else "n/a"
+
+
+def headline_score(result) -> tuple[str, float]:
+    """The one headline metric: accuracy for classifiers, mAP50 for detectors."""
+    held = result.get("heldout") or {}
+    if "accuracy" in held and held["accuracy"] is not None:
+        return "accuracy", float(held["accuracy"])
+    return "mAP50", float(held.get("map50", 0.0) or 0.0)
+
+
+def mean_f1(result) -> float:
+    values = [float(row.get("f1", 0.0) or 0.0) for row in (result.get("per_class") or [])]
+    return float(np.mean(values)) if values else 0.0
+
+
+def summary_rows(results) -> list[tuple[str, ...]]:
+    """Rows shared by the console summary and the Markdown summary table."""
+    rows = []
+    for result in results:
+        metric, value = headline_score(result)
+        agreement = float((result.get("consistency") or {}).get("agreement", 0.0) or 0.0)
+        rows.append((str(result.get("task", "?")), str(result.get("split_used", "?")),
+                     f"{metric} {value:.3f}", f"{mean_f1(result):.3f}",
+                     f"{agreement:.3f}", str(result.get("verdict", "n/a"))))
+    return rows
+
+
+SUMMARY_HEADER = ("Model", "Split", "mAP50 / accuracy", "F1", "Consistency", "Verdict")
+
+
+def print_selected_summary(results):
+    """Compact console table: one line per model, then any data warnings."""
+    rows = summary_rows(results)
+    widths = [max([len(header)] + [len(row[i]) for row in rows])
+              for i, header in enumerate(SUMMARY_HEADER)]
+    line = "-" * (sum(widths) + 5 * 3)
+
+    def render(cells):
+        return "  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(cells)).rstrip()
+
+    print(f"\n{line}\n{render(SUMMARY_HEADER)}\n{line}")
+    for row in rows:
+        print(render(row))
+    print(line)
+    for result in results:
+        for warning in result.get("data_warnings") or []:
+            print(f"  ! {result.get('task', '?')}: {warning}")
+
+
 def wilson(k, n, z=1.96):
     """95% confidence interval for an accuracy k/n."""
     if n == 0:
@@ -105,9 +184,87 @@ def load_curves(run: Path):
     return df, train_loss, val_loss, (df[metric] if metric else None), metric
 
 
+# ---- versioned multi model metadata -------------------------------------------
+def version_meta_path(version: str) -> Path:
+    """train/multi-models/model_vN.meta.json for a version like 'model_v1'."""
+    return MULTI / f"{version}.meta.json"
+
+
+def load_version_meta(version: str) -> dict | None:
+    """Read a versioned checkpoint's metadata; None if absent or malformed."""
+    path = version_meta_path(version)
+    if not path.is_file():
+        return None
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def _resolve_path(value, *bases: Path) -> Path:
+    """First existing candidate for a path stored in metadata (relative or absolute)."""
+    path = Path(str(value))
+    if path.is_absolute():
+        return path
+    for base in bases:
+        candidate = base / path
+        if candidate.exists():
+            return candidate
+    return (bases[0] / path) if bases else path
+
+
+def resolve_version_weights(version: str, meta: dict) -> Path:
+    """Weights named by meta['weights'], with model_vN.pt as the safe fallback."""
+    raw = meta.get("weights") or (MULTI / f"{version}.pt")
+    return _resolve_path(raw, MULTI, ROOT, ROOT.parent, Path.cwd())
+
+
+def resolve_version_dataset(meta: dict) -> Path:
+    """Dataset named by the metadata, defaulting to the multi-models dataset."""
+    raw = (meta.get("dataset") or meta.get("dataset_path")
+           or meta.get("dataset_dir") or (MULTI / "dataset"))
+    return _resolve_path(raw, MULTI, ROOT, ROOT.parent)
+
+
+def version_cfg(meta: dict, version: str) -> dict:
+    """Build a config from a version's meta.json, using config.json as fallback."""
+    cfg = dict(load_multi_config())
+    cfg["mode"] = str(meta.get("mode") or cfg.get("mode") or "detect")
+    cfg["version"] = version
+    classes, regions = meta.get("classes"), meta.get("regions")
+    if isinstance(classes, list):
+        cfg["model_classes"] = list(classes)      # keep 'classes' mapping-shaped
+    elif isinstance(classes, dict):
+        cfg["classes"] = dict(classes)
+    if isinstance(regions, list):
+        cfg["model_regions"] = list(regions)
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    imgsz = (meta.get("imgsz") or meta.get("image_size")
+             or params.get("imgsz") or params.get("image_size"))
+    if imgsz:
+        cfg["imgsz"] = imgsz                 # metadata wins over config's default
+    model = meta.get("model") or params.get("model")
+    if model and not cfg.get("model"):
+        cfg["model"] = model
+    return cfg
+
+
+def version_report_names(meta: dict, fallback) -> list[str]:
+    """Class order from the version metadata when it is available."""
+    classes = meta.get("classes") if isinstance(meta, dict) else None
+    if isinstance(classes, list) and classes:
+        return [str(c) for c in classes]
+    return list(fallback)
+
+
 # ---- multi-attribute model paths / config -------------------------------------
 def load_multi_config() -> dict:
-    """Read train/multi-models/config.json (no tasks.yaml entry required)."""
+    """Read train/multi-models/config.json (no tasks.yaml entry required).
+
+    config.json may now be a compatibility pointer to the latest version's
+    metadata, so merge that metadata's useful fields when such a pointer exists.
+    """
     fallback = {"mode": "detect", "imgsz": 640}
     if not MULTI_CONFIG.exists():
         return fallback
@@ -120,6 +277,23 @@ def load_multi_config() -> dict:
     inner = cfg.get("config")
     if isinstance(inner, dict):
         cfg = {**cfg, **inner}
+    pointer = cfg.get("latest") or cfg.get("version")
+    if isinstance(pointer, dict):
+        pointer = pointer.get("latest") or pointer.get("version")
+    if isinstance(pointer, str) and is_version_name(pointer):
+        meta = load_version_meta(pointer)
+        if meta:
+            params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+            if isinstance(meta.get("classes"), list):
+                cfg.setdefault("classes", meta["classes"])
+            if isinstance(meta.get("regions"), list):
+                cfg.setdefault("regions", meta["regions"])
+            for key in ("imgsz", "image_size", "model"):
+                if not cfg.get(key):
+                    value = meta.get(key) or params.get(key)
+                    if value:
+                        cfg[key] = value
+            cfg.setdefault("version", pointer)
     cfg.setdefault("mode", "detect")
     if not cfg.get("imgsz"):
         cfg["imgsz"] = cfg.get("image_size", 640)
@@ -130,6 +304,11 @@ def find_results_csv(run: Path, task: str) -> Path | None:
     """Locate results.csv for a task (the multi trainer may nest it)."""
     candidates = [run / "results.csv", run / "train" / "results.csv",
                   run / task / "results.csv", ROOT / "runs" / task / "results.csv"]
+    if task == "multi" or is_version_name(task):
+        # Versioned trainers write train/multi-models/<version>_run/results.csv;
+        # older multi checkpoints kept curves directly under multi-models/.
+        candidates += [MULTI / f"{task}_run" / "results.csv",
+                       MULTI / "results.csv", MULTI / task / "results.csv"]
     for path in candidates:
         if path.exists():
             return path
@@ -542,11 +721,20 @@ def consistency_multi(model, dataset, split, index, imgsz, device, names):
     }
 
 
-def evaluate_selected_one(weights, cfg, *, split="test", device=None, index, task_cfg):
-    """Evaluate one selected best.pt (individual task or 'multi') and report."""
+def evaluate_selected_one(weights, cfg, *, split="test", device=None, index, task_cfg,
+                          version_meta=None):
+    """Evaluate one selected weight (individual task, 'multi' or model_vN) and report."""
     task = task_name(weights)
-    is_multi = task == "multi"
-    if is_multi:
+    is_version = is_version_name(task)
+    is_multi = task == "multi" or is_version
+    meta = {}
+    if is_version:
+        meta = version_meta if isinstance(version_meta, dict) else (load_version_meta(task) or {})
+        cfg = version_cfg(meta, task)
+        dataset = resolve_version_dataset(meta)
+        run = ROOT / "runs" / task
+        out = run / "evaluation"
+    elif is_multi:
         cfg = load_multi_config()
         dataset = MULTI_DATASET
         run = MULTI
@@ -559,15 +747,18 @@ def evaluate_selected_one(weights, cfg, *, split="test", device=None, index, tas
     if not dataset.exists() or not (dataset / "dataset_report.json").exists():
         raise FileNotFoundError(
             f"No built dataset for {task}: "
-            f"{'run train_multi.py first' if is_multi else 'run build_dataset.py first'}"
+            f"{'run train.py first' if is_multi else 'run build_dataset.py first'}"
         )
     rep = json.loads((dataset / "dataset_report.json").read_text(encoding="utf-8"))
-    names = rep["names"]
+    names = version_report_names(meta, rep["names"]) if is_version else rep["names"]
     imgsz = int(cfg.get("imgsz", 640))
     out.mkdir(parents=True, exist_ok=True)
     rep_images = rep.get("images") or {}
     used_split = split if rep_images.get(split, 0) else "val"
 
+    weights = Path(weights)
+    if is_version and not weights.is_file():
+        weights = resolve_version_weights(task, meta)
     model = YOLO(str(weights))
     results_csv = find_results_csv(run, task)
     has_curves = results_csv is not None
@@ -577,9 +768,18 @@ def evaluate_selected_one(weights, cfg, *, split="test", device=None, index, tas
                     results_jpg=results_csv.with_name("results.jpg"))
     result = {
         "task": task, "mode": cfg.get("mode", "detect"), "weights": str(weights),
-        "split_used": used_split, "images": rep_images, "classes": names,
+        "split_used": used_split, "split_requested": split,
+        "images": rep_images, "classes": names,
         "generated_at": datetime.now(timezone.utc).isoformat(), "formulas": FORMULAS,
     }
+    if is_version:
+        result.update({
+            "version": task, "dataset": str(dataset),
+            "model_classes": list(meta.get("classes") or []),
+            "model_regions": list(meta.get("regions") or []),
+        })
+        if isinstance(meta.get("evaluation"), dict):
+            result["prior_evaluation"] = meta["evaluation"]
     if not has_curves:
         result["curves_note"] = "results.csv not found: train-val gap/verdict unavailable"
 
@@ -647,25 +847,36 @@ def format_single_markdown(report):
     """Markdown version of the original single-task report (with formulas)."""
     gap = report.get("gap_train_minus_val")
     gap_text = f"{gap:.4f}" if gap is not None else "n/a (no results.csv)"
-    lines = ["# Evaluation report", "", f"Task: {report['task']}",
+    metric, value = headline_score(report)
+    lines = ["# Evaluation report", "", f"Model: **{report['task']}**",
              f"Generated: {report.get('generated_at', '')}", "",
              FORMULA_MD,
+             f"**{metric} {value:.4f} (held-out {report['split_used']}) · "
+             f"{report['verdict']}** · gap {gap_text}", "",
              "| Split | Score |",
-             "|---|---:|",
-             f"| train | {report['train']} |",
-             f"| val | {report['val']} |",
-             f"| held-out ({report['split_used']}) | {report['heldout']} |", "",
-             f"**Verdict: {report['verdict']}** · gap {gap_text}", ""]
+             "|---|---|",
+             f"| train | {format_score(report['train'])} |",
+             f"| val | {format_score(report['val'])} |",
+             f"| held-out ({report['split_used']}) | {format_score(report['heldout'])} |", ""]
     if "consistency" in report:
-        lines += [f"Consistency: {report['consistency']}", ""]
-    for reason in report["reasons"]:
-        lines.append(f"- Reason: {reason}")
-    for advice in report["advice"]:
-        lines.append(f"- Suggestion: {advice}")
-    lines += ["", "| Class | n | Precision | Recall | F1 |", "|---|---:|---:|---:|---:|"]
+        consistency = report["consistency"]
+        lines += [f"Consistency: {consistency.get('agreement', 0.0):.4f} "
+                  f"on {consistency.get('label_checked', 0)} matched boxes", ""]
+        if consistency.get("note"):
+            lines.append(f"({consistency['note']})")
+    if report.get("reasons"):
+        lines += ["Reasons:", ""]
+        lines += [f"- {reason}" for reason in report["reasons"]]
+    if report.get("advice"):
+        lines += ["", "Suggestions:", ""]
+        lines += [f"- {advice}" for advice in report["advice"]]
+    lines += ["", "## Per-class results", "",
+              "| Class | n | Precision | Recall | F1 | mAP50 | mAP50-95 |",
+              "|---|---:|---:|---:|---:|---:|---:|"]
     for row in report["per_class"]:
         lines.append(
-            f"| {row['class']} | {row['n']} | {row['precision']:.3f} | {row['recall']:.3f} | {row['f1']:.3f} |"
+            f"| {row['class']} | {row['n']} | {row['precision']:.3f} | {row['recall']:.3f} | "
+            f"{row['f1']:.3f} | {row.get('map50', 0):.3f} | {row.get('map50_95', 0):.3f} |"
         )
     for warning in report["data_warnings"]:
         lines.append(f"- Warning: {warning}")
@@ -673,55 +884,67 @@ def format_single_markdown(report):
 
 
 def format_selected_markdown(results):
-    """Human-readable combined report for the selected models."""
+    """Clean combined report: summary table first, then one section per model."""
     lines = ["# Selected-model evaluation report", "",
              f"Generated: {datetime.now(timezone.utc).isoformat()}", "",
              FORMULA_MD,
-             "| Task | Mode | Split | Accuracy / mAP50-95 | F1 | Consistency | Verdict |",
-             "|---|---|---|---:|---:|---:|---|"]
-    for r in results:
-        heldout = r["heldout"]
-        score = heldout.get("accuracy", heldout.get("map50_95", 0.0))
-        f1_values = [row["f1"] for row in r["per_class"]]
-        f1 = float(np.mean(f1_values)) if f1_values else 0.0
-        lines.append(
-            f"| {r['task']} | {r['mode']} | {r['split_used']} | {score:.4f} | {f1:.4f} | "
-            f"{r['consistency'].get('agreement', 0.0):.4f} | {r['verdict']} |"
-        )
-    lines += ["", "## Details", ""]
+             "## Summary (held-out split)", "",
+             "| Model | Split | mAP50 / accuracy | F1 | Consistency | Verdict |",
+             "|---|---|---|---:|---:|---|"]
+    for row in summary_rows(results):
+        lines.append("| " + " | ".join(row) + " |")
+    lines += ["", "> F1 and consistency are means over matched classes / boxes; "
+              "see each model's section for the detail.", ""]
+
     for r in results:
         gap = r.get("gap_train_minus_val")
         gap_text = f"{gap:.4f}" if gap is not None else "n/a (no results.csv)"
-        lines += [f"### {r['task']}", "",
-                  f"- Weights: `{r['weights']}`",
-                  f"- Train {r['train']}",
-                  f"- Val {r['val']}",
-                  f"- Held-out ({r['split_used']}) {r['heldout']}",
-                  f"- Gap train−val: {gap_text} · **{r['verdict']}**",
-                  f"- Consistency: {r['consistency']}", "",
-                  "| Class | n | Precision | Recall | F1 | mAP50 | mAP50-95 |",
-                  "|---|---:|---:|---:|---:|---:|---:|"]
+        consistency = r.get("consistency") or {}
+        lines += [f"## {r['task']}", "",
+                  f"- Weights: `{r['weights']}` · mode: {r.get('mode', 'detect')} · "
+                  f"split: {r['split_used']}",
+                  f"- Train: {format_score(r['train'])}",
+                  f"- Val: {format_score(r['val'])}",
+                  f"- Held-out ({r['split_used']}): {format_score(r['heldout'])}",
+                  f"- Consistency: {consistency.get('agreement', 0.0):.4f} on "
+                  f"{consistency.get('label_checked', 0)} matched boxes",
+                  f"- Gap train−val: {gap_text} · **{r['verdict']}**", ""]
+        if consistency.get("note"):
+            lines += [f"_{consistency['note']}_", ""]
+        lines += ["### Per-class results", ""]
+        detect = str(r.get("mode", "detect")) == "detect"
+        if detect:
+            lines += ["| Class | n | Precision | Recall | F1 | mAP50 | mAP50-95 |",
+                      "|---|---:|---:|---:|---:|---:|---:|"]
+        else:
+            lines += ["| Class | n | Precision | Recall | F1 |",
+                      "|---|---:|---:|---:|---:|"]
         for row in r["per_class"]:
-            lines.append(
-                f"| {row['class']} | {row['n']} | {row['precision']:.3f} | {row['recall']:.3f} | "
-                f"{row['f1']:.3f} | {row.get('map50', 0):.3f} | {row.get('map50_95', 0):.3f} |"
-            )
-        for reason in r["reasons"]:
-            lines.append(f"- Reason: {reason}")
-        for warning in r["data_warnings"]:
-            lines.append(f"- Warning: {warning}")
+            cells = [str(row["class"]), str(row["n"]), f"{row['precision']:.3f}",
+                     f"{row['recall']:.3f}", f"{row['f1']:.3f}"]
+            if detect:
+                cells += [f"{row.get('map50', 0):.3f}", f"{row.get('map50_95', 0):.3f}"]
+            lines.append("| " + " | ".join(cells) + " |")
+        if r.get("reasons"):
+            lines += ["", "Reasons:", ""] + [f"- {reason}" for reason in r["reasons"]]
+        if r.get("advice"):
+            lines += ["", "Suggestions:", ""] + [f"- {advice}" for advice in r["advice"]]
+        if r.get("data_warnings"):
+            lines += ["", "Warnings:", ""] + [f"- {warning}" for warning in r["data_warnings"]]
         lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def run_selected(argv):
     """CLI for multi-model evaluation (selection popup / --all / --models)."""
     ap = argparse.ArgumentParser(description="Evaluate selected Raja-Fashion models")
-    ap.add_argument("--models", type=str, default=None, help="Comma-separated task names")
+    ap.add_argument("--models", type=str, default=None,
+                    help="Comma-separated task/version names (e.g. model_v1,model_v0)")
     ap.add_argument("--all", action="store_true", help="Evaluate every trained model")
     ap.add_argument("--select", action="store_true", help="Use the popup picker (default when no flags)")
     ap.add_argument("--cli", action="store_true", help="List available models and exit")
-    ap.add_argument("--split", default="test", choices=["val", "test"])
+    ap.add_argument("--split", default="test", choices=["val", "test"],
+                    help="held-out split: test by default (falls back to val if empty)")
     ap.add_argument("--device", type=str, default=None)
     args = ap.parse_args(argv)
 
@@ -731,12 +954,15 @@ def run_selected(argv):
             print(f"{model_label(weight):<28s} {weight}")
         return
     if not found:
-        sys.exit("No weights found under train/runs/*/weights/best.pt "
-                 "or train/multi-models/multi.pt")
+        sys.exit("No weights found under train/runs/*/weights/best.pt, "
+                 "train/multi-models/multi.pt or train/multi-models/model_v*.pt")
 
     if args.models:
         requested = [part.strip() for part in args.models.split(",") if part.strip()]
         selected = [w for w in found if task_name(w) in requested]
+        for name in requested:
+            if not any(task_name(w) == name for w in found):
+                print(f"Skip {name}: no weights found")
     elif args.all:
         selected = found
     else:
@@ -748,20 +974,34 @@ def run_selected(argv):
     if not selected:
         sys.exit("No models selected")
 
-    task_cfg = yaml.safe_load((ROOT / "tasks.yaml").read_text(encoding="utf-8")) or {}
+    # Versioned models use their meta.json, so a missing tasks.yaml is not fatal.
+    try:
+        task_cfg = yaml.safe_load((ROOT / "tasks.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        task_cfg = {}
     index = sidecar_index()
     results = []
+    print(f"Held-out split: {args.split} · {len(selected)} model(s) selected")
     for weights in selected:
         task = task_name(weights)
-        cfg = task_cfg.get(task)
-        if cfg is None and task != "multi":
-            print(f"Skip {task}: no entry in tasks.yaml")
-            continue
+        version_meta = None
+        if is_version_name(task):
+            version_meta = load_version_meta(task)
+            if version_meta is None:
+                print(f"Skip {task}: missing {version_meta_path(task).name}")
+                continue
+            cfg = version_cfg(version_meta, task)
+        else:
+            cfg = task_cfg.get(task)
+            if cfg is None and task != "multi":
+                print(f"Skip {task}: no entry in tasks.yaml")
+                continue
         print(f"Evaluating {task} …")
         try:
             results.append(evaluate_selected_one(weights, cfg, split=args.split,
                                                  device=args.device, index=index,
-                                                 task_cfg=task_cfg))
+                                                 task_cfg=task_cfg,
+                                                 version_meta=version_meta))
         except Exception as exc:
             print(f"FAILED {task}: {exc}")
     if not results:
@@ -771,7 +1011,8 @@ def run_selected(argv):
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "report.md").write_text(format_selected_markdown(results), encoding="utf-8")
-    print(f"\nWrote {out / 'report.json'} and {out / 'report.md'}")
+    print_selected_summary(results)
+    print(f"\nWrote {out / 'report.md'} and {out / 'report.json'}\n")
 
 
 # ---- single task (original CLI) ----------------------------------------------
@@ -783,8 +1024,20 @@ def run_single_task(argv):
     ap.add_argument("--device")
     args = ap.parse_args(argv)
 
-    is_multi = args.task == "multi"
-    if is_multi:
+    is_version = is_version_name(args.task)
+    is_multi = args.task == "multi" or is_version
+    version_meta = None
+    if is_version:
+        # Versioned multi checkpoints carry their own metadata: no tasks.yaml entry.
+        version_meta = load_version_meta(args.task)
+        if version_meta is None:
+            sys.exit(f"Missing {version_meta_path(args.task).name}; "
+                     "train the version or pass --weights explicitly.")
+        cfg = version_cfg(version_meta, args.task)
+        run = ROOT / "runs" / args.task
+        ds = resolve_version_dataset(version_meta)
+        out = run / "evaluation"
+    elif is_multi:
         # The multi model has no tasks.yaml entry: config + dataset live together.
         cfg = load_multi_config()
         run = MULTI
@@ -796,14 +1049,17 @@ def run_single_task(argv):
         ds = ROOT / "datasets" / args.task
         out = run / "evaluation"
     is_det = str(cfg.get("mode", "detect")) == "detect"
-    default_weights = MULTI / "multi.pt" if is_multi else run / "weights" / "best.pt"
+    if is_version:
+        default_weights = resolve_version_weights(args.task, version_meta)
+    else:
+        default_weights = MULTI / "multi.pt" if is_multi else run / "weights" / "best.pt"
     weights = Path(args.weights) if args.weights else default_weights
     if not weights.exists() or not (ds / "dataset_report.json").exists():
         sys.exit("Need a trained model and a built dataset. "
-                 + ("Run train_multi.py first." if is_multi
-                    else "Run build_dataset.py then train_individual.py first."))
+                 + ("Run train.py first." if is_multi
+                    else "Run build_dataset.py then train.py first."))
     rep = json.loads((ds / "dataset_report.json").read_text(encoding="utf-8"))
-    names = rep["names"]
+    names = version_report_names(version_meta, rep["names"]) if is_version else rep["names"]
     imgsz = int(cfg.get("imgsz", 640))
     out.mkdir(parents=True, exist_ok=True)
     rep_images = rep.get("images") or {}
@@ -815,8 +1071,16 @@ def run_single_task(argv):
 
     model = YOLO(str(weights))
     report = {"task": args.task, "weights": str(weights), "split_used": split,
-              "images": rep_images, "formulas": FORMULAS,
+              "images": rep_images, "classes": names, "formulas": FORMULAS,
               "generated_at": datetime.now(timezone.utc).isoformat()}
+    if is_version:
+        report.update({
+            "version": args.task, "dataset": str(ds),
+            "model_classes": list(version_meta.get("classes") or []),
+            "model_regions": list(version_meta.get("regions") or []),
+        })
+        if isinstance(version_meta.get("evaluation"), dict):
+            report["prior_evaluation"] = version_meta["evaluation"]
 
     # 1) training curves (optional for the multi model)
     results_csv = find_results_csv(run, args.task)
@@ -919,8 +1183,8 @@ def run_single_task(argv):
 
 
 def main(argv=None):
-    """Dispatch: a positional task runs the original single-task report;
-    otherwise use the model selector (--all / --models / popup / --cli)."""
+    """Dispatch: a positional task (individual, multi or model_vN) runs the
+    single-task report; otherwise use the selector (--all / --models / popup / --cli)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and not argv[0].startswith("-"):
         run_single_task(argv)

@@ -68,14 +68,55 @@ def load_region_prefixes() -> list[str]:
     return sorted(prefixes, key=len, reverse=True)
 
 
-REGION_PREFIXES = load_region_prefixes()
+def versioned_region_prefixes() -> list[str]:
+    """Extra prefixes recorded by the versioned trainer (config/meta json).
+
+    schema.yaml stays the source of truth, but a newer checkpoint may add a
+    region that is only listed in its meta.json. Including those regions keeps
+    '<region>_<value>' class names from versioned models mapped to plain values.
+    """
+    prefixes = set()
+    multi = TRAIN / "multi-models"
+
+    def add_regions(regions):
+        for region in regions or []:
+            region = str(region)
+            prefixes.add(region)
+            for obj in ("top", "bottom"):
+                prefixes.add(f"{obj}_{region}")
+
+    for name in ("config.json", "latest.json"):
+        try:
+            data = json.loads((multi / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        add_regions(data.get("regions"))
+        pointer = data.get("latest") or data.get("version")
+        if isinstance(pointer, dict):
+            pointer = pointer.get("latest") or pointer.get("version")
+        if isinstance(pointer, str) and pointer.startswith("model_v"):
+            try:
+                meta = json.loads((multi / f"{pointer}.meta.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(meta, dict):
+                add_regions(meta.get("regions"))
+    return sorted(prefixes, key=len, reverse=True)
+
+
+REGION_PREFIXES = sorted(set(load_region_prefixes()) | set(versioned_region_prefixes()),
+                         key=len, reverse=True)
 
 
 def value_tag(name) -> str:
     """Map '<region>_<value>' multi class names to the plain attribute value.
 
-    Individual models already emit plain values (crew, long, skinny, ...)
-    and are returned unchanged. Max-confidence-per-tag is handled by callers.
+    Works for the legacy multi model and for versioned model_vN checkpoints:
+    e.g. neck_crew -> crew, bottom_fit_skinny -> skinny, sleeve_left_long -> long.
+    Individual models already emit plain values (crew, long, skinny, ...) and
+    are returned unchanged. Max-confidence-per-tag is handled by callers.
     """
     text = str(name)
     for prefix in REGION_PREFIXES:
@@ -269,8 +310,10 @@ def resolve_weights(cli_weights, use_all: bool = False):
     if cli_weights:
         return [Path(w) for w in cli_weights]
     if use_all:
-        # Extended selector: individual models + multi-models/multi.pt.
+        # Extended selector: individual models + legacy multi.pt + model_v*.pt.
         return find_all_weights()
+    # The popup uses the same extended selector, so versioned models show up
+    # with a "versioned multi: model_vN" label alongside individual ones.
     selected = pick_models(title="Select models for closet search")
     return selected or []
 

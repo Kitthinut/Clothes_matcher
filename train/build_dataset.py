@@ -1,31 +1,39 @@
 #!/usr/bin/env python3
+"""Build the ONE combined multi-attribute YOLO dataset (no training).
+
+    python build_dataset.py                       # rebuild, then show an overview popup
+    python build_dataset.py --cli                 # headless: no popup
+    python build_dataset.py --data ../data --out multi-models --val 15 --test 15
+
+Re-run it whenever labels change. The dataset is rebuilt from scratch under
+``<out>/dataset/`` with ``images/{train,val,test}``, ``labels/{train,val,test}``,
+``data.yaml`` and ``dataset_report.json``. The default split is 70% train /
+15% validation / 15% test, assigned by a hash of the JSON stem so an image never
+jumps between splits when the dataset grows. Override with --val / --test;
+train gets the remainder (100 - val - test). The effective percentages are
+recorded in ``dataset_report.json`` under "split_percent".
+
+``train.py`` imports ``build_multi_dataset()`` from this module: this is the
+single source of truth for the dataset. The CLI adds a Tk "Dataset overview"
+popup that reports balance and, when a versioned (or legacy multi.pt) model is
+present, an OVERFIT / UNDERFIT / GOOD FIT verdict from evaluate.py. Neither OK
+nor Cancel deletes the generated dataset — Cancel only closes the window.
+
+Expected input: any folder tree under --data containing <name>.json +
+<name>.jpg/png/webp. JSON format: annotate/labeling_config/schema.yaml.
 """
-Turn annotation JSONs (yours + friends') into a YOLO dataset for ONE task from tasks.yaml.
+from __future__ import annotations
 
-    python build_dataset.py neck_crew
-    python build_dataset.py neck_crew --data ../data --val 15 --test 15
-
-Re-run it any time you add or relabel data. The train/val/test split is decided by a hash of
-the file name, so an image never jumps between splits when the dataset grows (no leakage,
-and results stay comparable between runs).
-
-The default split is 70% train / 15% validation / 15% test. Train always gets whatever is
-left over (100 - val - test); override the percentages with --val / --test (val + test must
-stay below 100). Effective percentages are written to dataset_report.json as "split_percent".
-
-Expected input: any folder tree under --data containing  <name>.json + <name>.jpg/png/webp.
-JSON format: see annotate/labeling_config/schema.yaml
-"""
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
-from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = ROOT.parent / "annotate" / "labeling_config" / "schema.yaml"
@@ -37,19 +45,22 @@ TRAIN_PCT = 70
 VAL_PCT = 15
 TEST_PCT = 15
 
+BASE_MODEL = "yolo11n.pt"
+VERSION_RE = re.compile(r"^model_v(\d+)\.pt$")
+
 
 def validate_split(val_pct: int, test_pct: int) -> int:
     """Validate a split request and return the implied training percentage.
 
-    The default policy is 70% train / 15% val / 15% test. Train always receives
-    the remainder (100 - val - test), so val + test must be below 100. Keeping
-    this check here makes build_dataset.py, train_multi.py and
-    build_dataset_multi.py agree on what a valid split is.
+    Train always receives 100 - val - test, so val + test must stay below 100.
+    Kept here so this builder, train.py and evaluate.py agree on what is valid.
     """
     if not isinstance(val_pct, int) or not isinstance(test_pct, int):
         raise ValueError("split percentages must be integers")
     if val_pct < 0 or test_pct < 0:
-        raise ValueError(f"split percentages must be non-negative (got val={val_pct}, test={test_pct})")
+        raise ValueError(
+            f"split percentages must be non-negative (got val={val_pct}, test={test_pct})"
+        )
     if val_pct + test_pct >= 100:
         raise ValueError(
             f"--val + --test must be < 100 (got {val_pct} + {test_pct} = "
@@ -59,6 +70,7 @@ def validate_split(val_pct: int, test_pct: int) -> int:
 
 
 def split_of(key: str, val_pct: int = VAL_PCT, test_pct: int = TEST_PCT) -> str:
+    """Stable hash-based split assignment for a JSON stem."""
     h = int(hashlib.sha1(key.encode()).hexdigest(), 16) % 100
     if h < test_pct:
         return "test"
@@ -67,54 +79,17 @@ def split_of(key: str, val_pct: int = VAL_PCT, test_pct: int = TEST_PCT) -> str:
     return "train"
 
 
-class Task:
-    def __init__(self, name, cfg):
-        self.name, self.cfg, self.mode = name, cfg, cfg["mode"]
-        if "attribute" in cfg:
-            self.object, self.attr = cfg["object"], cfg["attribute"]
-            self.lookup = {v: c for c, vals in cfg["classes"].items() for v in vals}
-            self.else_cls = cfg.get("else")
-            self.names = list(cfg["classes"])
-            if self.else_cls and self.else_cls not in self.names:
-                self.names.append(self.else_cls)
-        else:
-            self.object, self.attr, self.else_cls = None, None, None
-            self.objects = cfg["objects"]
-            self.names = list(self.objects)
-
-    def relevant(self, o):
-        """True if this box belongs to the task's garment type."""
-        if self.object is None:
-            return o.get("cls") in self.objects
-        return o.get("cls") == self.object
-
-    def label(self, o):
-        """Class name for this object, or None if it has not been labeled for this task."""
-        if self.object is None:
-            return o.get("cls")
-        v = (o.get("attrs") or {}).get(self.attr)
-        if v is None:
-            return None
-        return self.lookup.get(v, self.else_cls)
-
-    def labeled_boxes(self, objects):
-        """
-        Return only boxes that have a valid label for this task.
-        Important: an image has many region boxes (neck, button, sleeve…).
-        We must NOT require every box to have the task attribute — only keep
-        the ones that do (e.g. neck boxes for neck_type).
-        """
-        out = []
-        for o in objects:
-            if not self.relevant(o):
-                continue
-            l = self.label(o)
-            if l is not None:
-                out.append((o, l))
-        return out
+def find_image(jp: Path):
+    """Find the image sidecar for a JSON path, or None."""
+    for ext in IMG_EXT:
+        for cand in (jp.with_suffix(ext), jp.with_suffix(ext.upper())):
+            if cand.exists():
+                return cand
+    return None
 
 
 def schema_problems(o, schema):
+    """List schema violations for one annotation object."""
     p = []
     if o.get("cls") not in schema["classes"]:
         p.append(f"unknown class '{o.get('cls')}'")
@@ -128,298 +103,433 @@ def schema_problems(o, schema):
         elif v not in allowed[k]:
             p.append(f"{o['cls']}.{k}='{v}' not in {allowed[k]}")
     b = o.get("box")
-    if not (isinstance(b, list) and len(b) == 4 and all(isinstance(x, (int, float)) and 0 <= x <= 1 for x in b)
+    if not (isinstance(b, list) and len(b) == 4
+            and all(isinstance(x, (int, float)) and 0 <= x <= 1 for x in b)
             and b[2] > 0 and b[3] > 0):
         p.append(f"bad box {b}")
     return p
 
 
-def find_image(jp: Path):
-    for e in IMG_EXT:
-        for cand in (jp.with_suffix(e), jp.with_suffix(e.upper())):
-            if cand.exists():
-                return cand
-    return None
+def load_schema() -> dict:
+    """Read the annotation schema."""
+    if not SCHEMA_PATH.is_file():
+        sys.exit(f"Schema not found: {SCHEMA_PATH}")
+    return yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-def pick_task_gui(tasks: dict) -> list[str] | None:
-    """Popup window to select one or more tasks to build datasets for."""
+def attribute_for_region(region: str) -> str:
+    """sleeve_left / sleeve_right boxes store their value under `sleeve`."""
+    for side in ("_left", "_right"):
+        if region.endswith(side):
+            return region[:-len(side)]
+    return region
+
+
+def class_names_for_object(obj, schema: dict) -> tuple[list[str], str | None]:
+    """Return (class names, valid region) for one annotation object."""
+    if not isinstance(obj, dict):
+        return [], None
+    cls, region = obj.get("cls"), obj.get("region")
+    if cls not in schema["classes"]:
+        return [], None
+    if region not in schema["regions"].get(cls, []):
+        return [], None
+    if schema_problems(obj, schema):
+        return [], None
+
+    allowed = schema["attributes"].get(cls, {})
+    attr = attribute_for_region(region)
+    if attr not in allowed:
+        return [], None
+    value = (obj.get("attrs") or {}).get(attr)
+    if value is None or value not in allowed[attr]:
+        return [], None
+
+    prefix = "" if cls == "top" else f"{cls}_"
+    return [f"{prefix}{region}_{value}"], region
+
+
+def expected_class_names(schema: dict) -> list[str]:
+    """Every type the schema permits, used to spot missing / unlabeled types."""
+    expected: set[str] = set()
+    for cls in schema.get("classes", []):
+        prefix = "" if cls == "top" else f"{cls}_"
+        for region in schema.get("regions", {}).get(cls, []):
+            attr = attribute_for_region(region)
+            for value in schema.get("attributes", {}).get(cls, {}).get(attr, []):
+                expected.add(f"{prefix}{region}_{value}")
+    return sorted(expected)
+
+
+def read_json(path: Path) -> dict:
     try:
-        import tkinter as tk
-        from tkinter import ttk
-    except ImportError:
-        return None
-
-    choice = {"names": None}
-
-    root = tk.Tk()
-    root.title("raja_fashion – Choose training tasks")
-    root.geometry("560x520")
-    root.minsize(420, 400)
-    root.configure(bg="#eef1f5")
-
-    st = ttk.Style(root)
-    try:
-        st.theme_use("clam")
-    except tk.TclError:
-        pass
-
-    header = ttk.Frame(root, padding=(20, 16, 20, 8))
-    header.pack(fill="x")
-    ttk.Label(header, text="Choose what to train", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-    ttk.Label(header, text="Select one or more tasks (Ctrl/Cmd+click, Shift+click)",
-              foreground="#667085").pack(anchor="w", pady=(2, 0))
-
-    body = ttk.Frame(root, padding=(20, 8, 20, 8))
-    body.pack(fill="both", expand=True)
-
-    lb_frame = ttk.Frame(body)
-    lb_frame.pack(fill="both", expand=True)
-    lb = tk.Listbox(lb_frame, font=("Segoe UI", 11), activestyle="none",
-                    selectmode="extended", relief="flat", highlightthickness=1,
-                    highlightbackground="#d9dfe8", bg="white", exportselection=False)
-    sb = ttk.Scrollbar(lb_frame, command=lb.yview)
-    lb.config(yscrollcommand=sb.set)
-    lb.pack(side="left", fill="both", expand=True)
-    sb.pack(side="left", fill="y")
-
-    task_names = list(tasks.keys())
-    for name in task_names:
-        cfg = tasks[name]
-        mode = cfg.get("mode", "?")
-        if "attribute" in cfg:
-            desc = f"{name}   [{mode}]   {cfg.get('object', '')}.{cfg.get('attribute', '')}"
-        else:
-            desc = f"{name}   [{mode}]   objects={cfg.get('objects', [])}"
-        lb.insert("end", desc)
-
-    if task_names:
-        lb.selection_set(0)
-        lb.activate(0)
-
-    detail = ttk.Label(body, text="", foreground="#667085", wraplength=500, justify="left")
-    detail.pack(fill="x", pady=(8, 0))
-    count_lbl = ttk.Label(body, text="1 selected", foreground="#2f5d8a")
-    count_lbl.pack(anchor="w", pady=(4, 0))
-
-    def on_select(_event=None):
-        sel = lb.curselection()
-        count_lbl.config(text=f"{len(sel)} selected" if sel else "0 selected")
-        if not sel:
-            detail.config(text="")
-            return
-        # Show details for the last clicked item
-        name = task_names[sel[-1]]
-        cfg = tasks[name]
-        lines = [f"Mode: {cfg.get('mode')}"]
-        if "attribute" in cfg:
-            lines.append(f"Object: {cfg.get('object')}  ·  Attribute: {cfg.get('attribute')}")
-            classes = cfg.get("classes", {})
-            lines.append("Classes: " + ", ".join(classes.keys()))
-            if cfg.get("else"):
-                lines.append(f"Else class: {cfg['else']}")
-        else:
-            lines.append(f"Objects: {cfg.get('objects', [])}")
-        lines.append(f"Model: {cfg.get('model', '—')}  ·  imgsz: {cfg.get('imgsz', 640)}")
-        if len(sel) > 1:
-            lines.append(f"\n(+ {len(sel) - 1} more task(s) selected)")
-        detail.config(text="\n".join(lines))
-
-    lb.bind("<<ListboxSelect>>", on_select)
-    on_select()
-
-    def select_all():
-        lb.selection_set(0, "end")
-        on_select()
-
-    def confirm():
-        sel = lb.curselection()
-        if not sel:
-            return
-        choice["names"] = [task_names[i] for i in sel]
-        root.destroy()
-
-    def cancel():
-        choice["names"] = None
-        root.destroy()
-
-    root.bind("<Return>", lambda e: confirm())
-    root.bind("<Escape>", lambda e: cancel())
-
-    footer = ttk.Frame(root, padding=(20, 8, 20, 16))
-    footer.pack(fill="x")
-    ttk.Button(footer, text="Select all", command=select_all).pack(side="left")
-    ttk.Button(footer, text="Cancel", command=cancel).pack(side="right")
-    ttk.Button(footer, text="Build dataset(s)", command=confirm).pack(side="right", padx=(0, 8))
-
-    root.mainloop()
-    return choice["names"]
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def build_one(task_name: str, tasks: dict, schema: dict, data_dir: Path, out_root: Path,
-              val_pct: int, test_pct: int, pad: float) -> bool:
-    """Build dataset for a single task. Returns True if successful."""
+def write_config_pointer(out: Path, names: list[str], regions: list[str]) -> None:
+    """Leave a config.json for evaluate.py when there is no trained version yet.
+
+    train.py replaces this with full version metadata after training, so an
+    existing config.json is never overwritten here.
+    """
+    cfg_path = out / "config.json"
+    if cfg_path.exists():
+        try:
+            if isinstance(json.loads(cfg_path.read_text(encoding="utf-8")), dict):
+                return
+        except (OSError, ValueError):
+            pass  # malformed: replace with a valid pointer below
+    cfg = {
+        "mode": "detect",
+        "model": BASE_MODEL,
+        "imgsz": 640,
+        "classes": names,
+        "regions": regions,
+    }
+    cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def build_multi_dataset(data_dir: Path, out: Path, schema: dict,
+                        val_pct: int, test_pct: int):
+    """Build the combined detection dataset. Returns (names, regions, report).
+
+    ``out`` is the multi-models folder; the dataset itself lives in
+    ``out / "dataset"``. The report includes split percentages, image counts,
+    per-class counts on every split, per-garment totals and missing schema types
+    so the overview popup can show imbalance.
+    """
     train_pct = validate_split(val_pct, test_pct)
-    task = Task(task_name, tasks[task_name])
-    out = out_root / task_name
-    if out.exists():
-        shutil.rmtree(out)
-    for s in SPLITS:
-        if task.mode == "detect":
-            (out / "images" / s).mkdir(parents=True)
-            (out / "labels" / s).mkdir(parents=True)
-        else:
-            for n in task.names:
-                (out / s / n).mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
+    ds = out / "dataset"
+    if ds.exists():
+        shutil.rmtree(ds)
+    for split in SPLITS:
+        (ds / "images" / split).mkdir(parents=True, exist_ok=True)
+        (ds / "labels" / split).mkdir(parents=True, exist_ok=True)
 
-    skipped, warns = Counter(), []
-    n_images = Counter()
-    n_inst = defaultdict(Counter)
+    # Collect first so the class list is complete before label indices are assigned.
+    collected: dict[str, dict] = {}
+    names_set: set[str] = set()
+    regions_set: set[str] = set()
+    skipped = Counter()
+    warns = []
 
     for jp in sorted(data_dir.rglob("*.json")):
         try:
-            meta = json.loads(jp.read_text("utf-8"))
-        except Exception as e:
-            warns.append(f"{jp.name}: unreadable JSON ({e})")
+            meta = json.loads(jp.read_text(encoding="utf-8"))
+        except Exception as exc:
+            warns.append(f"{jp.name}: unreadable JSON ({exc})")
             continue
-        if not isinstance(meta, dict) or "objects" not in meta:
+        if not isinstance(meta, dict) or not isinstance(meta.get("objects"), list):
             continue
+
         img = find_image(jp)
         if img is None:
             skipped["image file missing"] += 1
             continue
 
-        problems = [f"{jp.name}: {p}" for o in meta["objects"] for p in schema_problems(o, schema)]
-        if problems:
-            skipped["schema errors"] += 1
-            warns.extend(problems[:2])
+        boxes = []
+        for obj in meta["objects"]:
+            names, region = class_names_for_object(obj, schema)
+            if not names:
+                continue
+            regions_set.add(region)
+            for name in names:
+                boxes.append((name, obj))
+        if not boxes:
+            skipped["no labeled region boxes"] += 1
             continue
 
-        # Only boxes that actually have this task's attribute (e.g. neck boxes
-        # for neck_type). Other regions on the same garment are ignored.
-        labeled = task.labeled_boxes(meta["objects"])
-        if not labeled:
-            skipped["not labeled for this task yet"] += 1
-            continue
+        split = split_of(jp.stem, val_pct, test_pct)  # same hash split everywhere
+        collected[jp.stem] = {"split": split, "image": img, "boxes": boxes}
+        names_set.update(name for name, _ in boxes)
 
-        split = split_of(jp.stem, val_pct, test_pct)
+    names = sorted(names_set)
+    index = {name: i for i, name in enumerate(names)}
+
+    n_images = Counter()
+    n_inst = defaultdict(Counter)
+    garment_inst = Counter()
+    garment_images = defaultdict(Counter)
+
+    for stem, item in collected.items():
+        split = item["split"]
         n_images[split] += 1
+        dest = ds / "images" / split / (stem + item["image"].suffix.lower())
+        shutil.copy2(item["image"], dest)
 
-        if task.mode == "detect":
-            shutil.copy2(img, out / "images" / split / (jp.stem + img.suffix.lower()))
-            lines = []
-            for o, l in labeled:
-                cx, cy, w, h = o["box"]
-                lines.append(f"{task.names.index(l)} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
-                n_inst[split][l] += 1
-            (out / "labels" / split / (jp.stem + ".txt")).write_text(
-                "\n".join(lines) + ("\n" if lines else "")
-            )
-        else:
-            with Image.open(img) as im:
-                im = ImageOps.exif_transpose(im).convert("RGB")
-                W, H = im.size
-                for i, (o, l) in enumerate(labeled):
-                    cx, cy, w, h = o["box"]
-                    x1 = max(0, (cx - w / 2 - pad * w) * W)
-                    y1 = max(0, (cy - h / 2 - pad * h) * H)
-                    x2 = min(W, (cx + w / 2 + pad * w) * W)
-                    y2 = min(H, (cy + h / 2 + pad * h) * H)
-                    if x2 - x1 < 8 or y2 - y1 < 8:
-                        continue
-                    im.crop((int(x1), int(y1), int(x2), int(y2))).save(
-                        out / split / l / f"{jp.stem}_{i}.jpg", quality=92
-                    )
-                    n_inst[split][l] += 1
+        lines = []
+        seen_garments: set[str] = set()
+        for name, obj in item["boxes"]:
+            cx, cy, w, h = obj["box"]
+            lines.append(f"{index[name]} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+            n_inst[split][name] += 1
+            garment = str(obj.get("cls") or "unknown")
+            garment_inst[garment] += 1
+            seen_garments.add(garment)
+        for garment in seen_garments:
+            garment_images[garment][split] += 1
+        (ds / "labels" / split / (stem + ".txt")).write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
 
-    if task.mode == "detect":
-        (out / "data.yaml").write_text(yaml.safe_dump({
-            "path": str(out.resolve()), "train": "images/train", "val": "images/val", "test": "images/test",
-            "names": dict(enumerate(task.names)),
-        }, sort_keys=False))
-    report = {"task": task.name, "mode": task.mode, "names": task.names,
-              "split_percent": {"train": train_pct, "val": val_pct, "test": test_pct},
-              "images": dict(n_images), "instances": {s: dict(n_inst[s]) for s in SPLITS},
-              "skipped": dict(skipped)}
-    (out / "dataset_report.json").write_text(json.dumps(report, indent=2))
+    ds_yaml = ds / "data.yaml"
+    ds_yaml.write_text(
+        yaml.safe_dump({
+            "path": str(ds.resolve()),
+            "train": "images/train",
+            "val": "images/val",
+            "test": "images/test",
+            "names": dict(enumerate(names)),
+        }, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
-    print(f"\nTask '{task.name}' ({task.mode}) -> {out}")
-    print(f"{'split':<7}{'images':>8}  " + "  ".join(f"{n:>12}" for n in task.names))
-    for s in SPLITS:
-        print(f"{s:<7}{n_images[s]:>8}  " + "  ".join(f"{n_inst[s][n]:>12}" for n in task.names))
+    report = {
+        "names": names,
+        "regions": sorted(regions_set),
+        "split_percent": {"train": train_pct, "val": val_pct, "test": test_pct},
+        "images": {split: n_images[split] for split in SPLITS},
+        # Flat train counts kept for backwards compatibility with evaluate.py.
+        "instances": {name: n_inst["train"][name] for name in names},
+        "instances_by_split": {
+            split: {name: n_inst[split][name] for name in names} for split in SPLITS
+        },
+        "garments": {
+            garment: {
+                "instances": garment_inst[garment],
+                "images": {split: garment_images[garment][split] for split in SPLITS},
+            }
+            for garment in sorted(garment_inst)
+        },
+        "missing_types": sorted(set(expected_class_names(schema)) - names_set),
+        "skipped": dict(skipped),
+    }
+    (ds / "dataset_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    write_config_pointer(out, names, report["regions"])
+
+    print(f"Combined dataset -> {ds}")
+    print(f"  classes: {len(names)}   regions: {len(report['regions'])}   "
+          "images: " + ", ".join(f"{s}={n_images[s]}" for s in SPLITS))
     if skipped:
-        print("Skipped:", dict(skipped))
-    for w in warns[:5]:
-        print("  warning:", w)
-
-    ok = True
-    if n_images["train"] == 0 or n_images["val"] == 0:
-        print(f"  ERROR: train or val split is empty for '{task.name}'.")
-        ok = False
-    for s in ("val", "test"):
-        if n_images[s] < 15:
-            print(f"  ! only {n_images[s]} images in {s}: metrics will be noisy")
-    tr = [n_inst["train"][n] for n in task.names]
-    for n, c in zip(task.names, tr):
-        if c < 30:
-            print(f"  ! class '{n}' has only {c} training instances (aim for 50+)")
-    if tr and min(tr) > 0 and max(tr) / min(tr) > 4:
-        print("  ! classes are imbalanced (>4x)")
-    return ok
+        print("  skipped:", dict(skipped))
+    for warning in warns[:5]:
+        print("  warning:", warning)
+    return names, report["regions"], report
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("task", nargs="*", default=None,
-                    help="Task name(s) from tasks.yaml. If omitted, a popup lets you choose.")
-    ap.add_argument("--data", default=str(ROOT.parent / "data"),
-                    help="folder with images + JSONs (searched recursively)")
-    ap.add_argument("--out", default=str(ROOT / "datasets"))
-    ap.add_argument("--val", type=int, default=VAL_PCT,
-                    help="percent of images for validation (default split: 70 train / 15 val / 15 test)")
-    ap.add_argument("--test", type=int, default=TEST_PCT,
-                    help="percent of images for test (default split: 70 train / 15 val / 15 test)")
-    ap.add_argument("--pad", type=float, default=0.08, help="crop padding for cls mode")
-    ap.add_argument("--cli", action="store_true", help="do not open the task picker popup")
-    args = ap.parse_args()
+# ---------------------------------------------------------------------------
+# CLI overview popup (data balance + optional latest-model verdict)
+# ---------------------------------------------------------------------------
 
+def find_latest_weights(out: Path) -> Path | None:
+    """Newest model_vN.pt, else the legacy multi.pt, else None."""
+    versions = []
+    for path in out.glob("model_v*.pt"):
+        match = VERSION_RE.match(path.name)
+        if match:
+            versions.append((int(match.group(1)), path))
+    if versions:
+        return max(versions, key=lambda item: item[0])[1]
+    legacy = out / "multi.pt"
+    return legacy if legacy.is_file() else None
+
+
+def fit_label(verdict) -> str:
+    """Map evaluate.py's verdict wording to OVERFIT / UNDERFIT / GOOD FIT."""
+    raw = str(verdict or "")
+    upper = raw.upper()
+    if "OVERFIT" in upper:
+        return "OVERFIT"
+    if "UNDERFIT" in upper:
+        return "UNDERFIT"
+    if "N/A" in upper or not raw:
+        return "N/A"
+    if "GOOD" in upper:
+        return "GOOD FIT"
+    return raw
+
+
+def evaluation_summary(out: Path, data_dir: Path, weights: Path,
+                       names: list[str], regions: list[str]) -> dict:
+    """Evaluate one checkpoint with evaluate.py (via train.py's bridge)."""
+    meta = read_json(out / f"{weights.stem}.meta.json") \
+        if VERSION_RE.match(weights.name) else read_json(out / "config.json")
+    meta = dict(meta)
+    meta.setdefault("classes", names)
+    meta.setdefault("regions", regions)
     try:
-        train_pct = validate_split(args.val, args.test)
+        import train  # lazy: imports build_dataset, but not Ultralytics
+        ev = train.evaluate_weights(weights, out, data_dir=data_dir, meta=meta)
+    except Exception as exc:
+        return {
+            "fit": "N/A", "verdict": "n/a",
+            "note": f"Evaluation unavailable: {exc}"[:300],
+        }
+    ev["fit"] = fit_label(ev.get("verdict"))
+    return ev
+
+
+def overview_text(names: list[str], regions: list[str], report: dict,
+                  out: Path, data_dir: Path) -> str:
+    """Plain-text body of the overview popup (also handy for --cli output)."""
+    images = report.get("images") or {}
+    pct = report.get("split_percent") or {}
+    by_split = report.get("instances_by_split") or {}
+    total = sum(int(images.get(s, 0)) for s in SPLITS)
+    lines = [
+        "Dataset overview",
+        "",
+        f"Total images: {total}",
+        f"  train: {images.get('train', 0):>5}  ({pct.get('train', TRAIN_PCT)}%)",
+        f"  val:   {images.get('val', 0):>5}  ({pct.get('val', VAL_PCT)}%)",
+        f"  test:  {images.get('test', 0):>5}  ({pct.get('test', TEST_PCT)}%)",
+        f"Classes: {len(names)}    Regions: {len(regions)}",
+        "",
+        "Instances per class (train / val / test):",
+    ]
+    width = max([len("class")] + [len(n) for n in names]) + 2
+    lines.append(f"  {'class':<{width}}{'train':>7}{'val':>7}{'test':>7}")
+    for name in names:
+        counts = [int((by_split.get(s) or {}).get(name, 0)) for s in SPLITS]
+        lines.append(f"  {name:<{width}}" + "".join(f"{c:>7}" for c in counts))
+    lines.append("")
+
+    garments = report.get("garments") or {}
+    if garments:
+        lines.append("Per garment (boxes / images carrying that garment):")
+        for garment, info in sorted(garments.items()):
+            gimgs = info.get("images") or {}
+            lines.append(
+                f"  {garment:<10} {info.get('instances', 0):>6} boxes   "
+                f"{sum(int(gimgs.get(s, 0)) for s in SPLITS):>5} images"
+            )
+        lines.append("")
+
+    train_counts = [int((by_split.get("train") or {}).get(n, 0)) for n in names]
+    low = [n for n, c in zip(names, train_counts) if c < 30]
+    missing = list(report.get("missing_types") or [])
+    lines.append(f"Missing schema types ({len(missing)}): "
+                 + (", ".join(missing) if missing else "none"))
+    if low:
+        lines.append(f"Low training counts (<30): {', '.join(low)}")
+    if train_counts and min(train_counts) > 0 and max(train_counts) / min(train_counts) > 4:
+        lines.append("Imbalance: busiest class has >4x the boxes of the rarest class.")
+    lines.append("")
+
+    weights = find_latest_weights(out)
+    if weights is None:
+        lines.append("Model: no model yet — data balance only")
+    else:
+        ev = evaluation_summary(out, data_dir, weights, names, regions)
+        lines.append(f"Model: {weights.name}")
+        lines.append(f"Fit verdict: {ev.get('fit', 'n/a')}   [raw: {ev.get('verdict', 'n/a')}]")
+        metrics = [f"{key}={ev.get(key)}" for key in
+                   ("map50", "map50_95", "f1", "consistency")
+                   if ev.get(key) is not None]
+        if metrics:
+            lines.append("  " + "  ".join(metrics))
+        if ev.get("note"):
+            lines.append(f"  note: {ev['note']}")
+        for reason in list(ev.get("reasons") or [])[:5]:
+            lines.append(f"  - {reason}")
+    return "\n".join(lines)
+
+
+def overview_popup(text: str) -> None:
+    """Show the overview. OK and Cancel both just close: nothing is deleted."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+        root = tk.Tk()
+    except Exception as exc:
+        print(f"Popup unavailable ({exc}); overview below.\n")
+        print(text)
+        return
+
+    root.title("Dataset overview")
+    root.geometry("760x620")
+    root.minsize(560, 420)
+    root.configure(bg="#eef1f5")
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    frame = ttk.Frame(root, padding=14)
+    frame.pack(fill="both", expand=True)
+    box = tk.Text(frame, wrap="none", font=("Consolas", 10), bg="white",
+                  relief="flat", highlightthickness=1, highlightbackground="#d9dfe8")
+    scroll = ttk.Scrollbar(frame, command=box.yview)
+    box.config(yscrollcommand=scroll.set)
+    box.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="left", fill="y")
+    box.insert("1.0", text)
+    box.config(state="disabled")
+
+    footer = ttk.Frame(root, padding=(14, 4, 14, 12))
+    footer.pack(fill="x")
+    ttk.Button(footer, text="Cancel", command=root.destroy).pack(side="right")
+    ttk.Button(footer, text="OK", command=root.destroy).pack(side="right", padx=(0, 8))
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.bind("<Escape>", lambda _e: root.destroy())
+    root.mainloop()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        description="Build the combined multi-attribute detection dataset "
+                    "(no training), then show a dataset overview.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ap.add_argument("--data", default=str(ROOT.parent / "data"),
+                    help="folder with images + JSON sidecars (searched recursively)")
+    ap.add_argument("--out", default=str(ROOT / "multi-models"),
+                    help="output folder for the dataset and model versions")
+    ap.add_argument("--val", type=int, default=VAL_PCT,
+                    help=f"percent of images for validation (default split "
+                         f"{TRAIN_PCT}/{VAL_PCT}/{TEST_PCT})")
+    ap.add_argument("--test", type=int, default=TEST_PCT,
+                    help="percent of images for test")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="CLI parity with train.py; the hash-based split ignores it")
+    ap.add_argument("--cli", "--yes", action="store_true", dest="cli",
+                    help="skip the overview popup (headless)")
+    return ap
+
+
+def main(argv=None) -> None:
+    args = build_parser().parse_args(argv)
+    try:
+        validate_split(args.val, args.test)
     except ValueError as exc:
         sys.exit(f"Invalid split: {exc}")
 
-    tasks = yaml.safe_load((ROOT / "tasks.yaml").read_text("utf-8"))
-    schema = yaml.safe_load(SCHEMA_PATH.read_text("utf-8"))
+    data_dir = Path(args.data).resolve()
+    out = Path(args.out).resolve()
+    if not data_dir.is_dir():
+        sys.exit(f"Data folder not found: {data_dir} (override with --data).")
+    schema = load_schema()
 
-    selected = list(args.task) if args.task else None
-    if not selected and not args.cli:
-        selected = pick_task_gui(tasks)
-        if selected is None:
-            sys.exit("No task selected.")
-    if not selected:
-        sys.exit(f"Give task name(s), or run without --cli to pick from a list.\nAvailable: {', '.join(tasks)}")
+    names, regions, report = build_multi_dataset(data_dir, out, schema, args.val, args.test)
+    if not names:
+        sys.exit("No usable labeled region boxes found. Check --data and schema.yaml.")
 
-    for name in selected:
-        if name not in tasks:
-            sys.exit(f"Unknown task '{name}'. Available: {', '.join(tasks)}")
-
-    data_dir = Path(args.data)
-    out_root = Path(args.out)
-    print(f"Building {len(selected)} dataset(s): {', '.join(selected)}")
-    print(f"Split: train={train_pct}%  val={args.val}%  test={args.test}%  (hash-based)")
-
-    all_ok = True
-    for name in selected:
-        ok = build_one(name, tasks, schema, data_dir, out_root, args.val, args.test, args.pad)
-        all_ok = all_ok and ok
-
-    print("\n" + "=" * 50)
-    if all_ok:
-        print(f"Done. Built: {', '.join(selected)}")
-        print("Next:  python train.py <task>")
-    else:
-        print("Finished with errors on some tasks. Check the messages above.")
-        sys.exit(1)
+    print("=" * 60)
+    print("Dataset-only build complete (no YOLO training performed)")
+    print(f"  dataset : {out / 'dataset'}")
+    print(f"  data    : {out / 'dataset' / 'data.yaml'}")
+    print(f"  report  : {out / 'dataset' / 'dataset_report.json'}")
+    print("=" * 60)
+    if not args.cli:
+        overview_popup(overview_text(names, regions, report, out, data_dir))
 
 
 if __name__ == "__main__":

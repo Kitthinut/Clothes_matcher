@@ -5,7 +5,7 @@
 A complete open-source pipeline:
 
 1. **Annotate** – label tops & bottoms with detailed attributes (and left/right sleeves)
-2. **Train** – progressive YOLO training (start with one attribute, then expand)
+2. **Train** – one versioned YOLO detector for every labeled attribute region (`python train.py`)
 3. **Search** – detect attributes + dominant color → rank your closet items
 
 ---
@@ -14,7 +14,7 @@ A complete open-source pipeline:
 
 | Goal | Decision |
 |------|----------|
-| Easy progressive training | Attribute-specific boxes + `tasks.yaml` so you can train “crew vs not-crew” first |
+| Easy progressive training | Attribute-specific boxes: each training run adds classes to the next versioned model |
 | Friends can help label | Clean JSON sidecar + strict photo checker + detailed HOW_TO_LABEL.md |
 | Low storage | Only images + small JSON (no huge annotation databases) |
 | Real-world usable | Color matching (HSV + curated palette) + attribute matching |
@@ -34,17 +34,17 @@ raja_fashion/
 │   └── labeling_config/
 │       └── schema.yaml        # Allowed classes & attributes
 │
-├── train/                     # Dataset building + YOLO training + evaluation
-│   ├── tasks.yaml             # Progressive tasks (neck_crew, top_length, …)
-│   ├── build_dataset.py       # JSON → YOLO dataset (detect or cls)
-│   ├── train_individual.py    # One model per task (was train.py) – thin ultralytics wrapper
-│   ├── train_multi.py         # One model for every attribute region (region_value classes)
-│   ├── build_dataset_multi.py # Dataset-only helper for train_multi.py (no YOLO training)
-│   ├── evaluate.py            # Single task OR selected models: accuracy, F1, consistency, diagnosis
-│   ├── select_models.py       # Popup / CLI multi-model picker
-│   ├── datasets/              # Generated (git-ignored)
-│   ├── runs/                  # Per-task individual training outputs (git-ignored)
-│   └── multi-models/          # Combined dataset, config.json and multi.pt (git-ignored)
+├── train/                     # Dataset building + YOLO training + evaluation + prediction
+│   ├── tasks.yaml             # Legacy per-task definitions (individual models)
+│   ├── build_dataset.py       # ONLY dataset builder: JSON → shared 70/15/15 YOLO dataset
+│   ├── train.py               # ONLY trainer: dataset build + versioned multi-attribute YOLO
+│   ├── evaluate.py            # Model picker + accuracy/F1/consistency/verdict reports
+│   ├── predict_image.py       # GUI: upload a photo → boxes + labelled confidence panel
+│   ├── select_models.py       # Shared popup / CLI model picker
+│   ├── datasets/              # Legacy per-task datasets (git-ignored)
+│   ├── runs/                  # Ultralytics/evaluation outputs (git-ignored)
+│   └── multi-models/          # dataset/, model_vN.pt + model_vN.meta.json,
+│                              # latest.json, config.json, multi.pt alias (git-ignored)
 │
 ├── search/                    # Inference + closet search + live demo
 │   ├── search.py              # Reference photo → ranked closet matches
@@ -58,6 +58,12 @@ raja_fashion/
 └── README.md                  # ← you are here
 ```
 
+**One script per job.** `build_dataset.py` is the only dataset builder,
+`train.py` is the only trainer, `evaluate.py` is the only evaluator and
+`predict_image.py` is the photo GUI. The old `prepare_data.py` and
+`build_dataset_multi.py` helpers were **removed**; their functionality lives in
+`build_dataset.py` (which exposes `build_multi_dataset` / `SCHEMA_PATH`).
+
 ---
 
 ## How the pieces work together
@@ -70,8 +76,8 @@ flowchart TD
     D --> E[validate.py]
     E --> F[build_dataset.py + tasks.yaml]
     F --> G[YOLO dataset]
-    G --> H[train_individual.py / train_multi.py]
-    H --> I[best.pt / multi.pt weights]
+    G --> H[train.py: versioned multi detector]
+    H --> I[model_vN.pt weights]
     I --> J[evaluate.py]
     J --> K{Good fit?}
     K -->|No| C
@@ -99,23 +105,30 @@ python label.py ../data/my_photos
 # 4. Validate
 python validate.py ../data/my_photos
 
-# 5. Build a first task (crew-neck detector)
+# 5. Train ONE model for every labeled attribute region.
+#    The dataset is rebuilt automatically; a popup shows the dataset summary and
+#    the OLD model's overfit report before training.
 cd ../train
-python build_dataset.py neck_crew --data ../data
+python train.py --epochs 80 --batch 16
 
-# 6. Train one task (individual model; popup picker if no task is given)
-python train_individual.py neck_crew --epochs 80 --batch 16
+# 5b. (optional) refresh the shared 70/15/15 dataset without training
+python build_dataset.py
 
-# 6b. OR train ONE model that detects all labeled attribute regions at once
-python train_multi.py --epochs 80 --batch 16
+# 6. Diagnose the latest version (also run automatically after training)
+python evaluate.py multi
 
-# 7. Diagnose one task
-python evaluate.py neck_crew
-
-# 7b. Diagnose the models you select (popup picker, all, or explicit list)
+# 6b. Diagnose the models you select (popup picker, all, or explicit list).
+#     With no arguments a multi-select popup lists individual, versioned and
+#     legacy-multi weights; the held-out split is TEST by default.
 python evaluate.py
 python evaluate.py --all
-python evaluate.py --models neck_type,bottom_fit
+python evaluate.py --models model_v1,model_v0 --split test
+python evaluate.py --cli                 # list available models, no GUI
+
+# 7. Test a photo in the GUI: "Upload picture…" (top-left) + model picker.
+#    Detected labels, confidence and weights appear in the results panel.
+python predict_image.py
+#    CLI equivalent: python predict_image.py photo.jpg --weights multi-models/multi.pt
 
 # 8. Search your closet
 cd ../search
@@ -127,50 +140,70 @@ python live_demo.py
 
 ### Training scripts and outputs
 
-There are two ways to train:
+There is **one** trainer: **`python train.py`** from `train/`. There is no
+separate individual-training path. Each run rebuilds the combined detection
+dataset from every sidecar under `data/**/*.json` and trains one YOLO model for
+all labeled regions in one pass. Classes are `<region>_<value>` strings such as
+`neck_crew`, `sleeve_left_long` and `bottom_fit_skinny`, derived from
+`schema.yaml`. Training always uses the **full current dataset**.
 
-- **`train_individual.py`** – the original behavior. Run it with no task to get
-  the popup task picker, or pass one or more tasks from `tasks.yaml`
-  (`--cli` skips the popup). Supports `--epochs`, `--batch`, `--patience`,
-  `--imgsz`, `--model`, `--device` and `--square`. One YOLO model is trained
-  per task; weights land in `train/runs/<task>/weights/best.pt`.
-- **`train_multi.py`** – builds one combined detection dataset from every
-  sidecar under `data/**/*.json` and trains a single YOLO model for all
-  labeled regions in one pass. Classes are `<region>_<value>` strings such as
-  `neck_crew`, `sleeve_left_long` and `bottom_fit_skinny`, derived from
-  `schema.yaml`. It uses the shared hash-based split described in
-  "Dataset split policy" below, so images never move between splits.
-  Supports `--model` (default `yolo11n.pt`),
-  `--epochs`, `--batch`, `--imgsz`, `--device`, `--patience`, `--square` and
-  `--seed`. Final weights: `train/multi-models/multi.pt` (a copy of the
-  Ultralytics `best.pt`, also kept at `train/multi-models/best.pt`).
+**Versioned output** (all under `train/multi-models/`):
 
-Multi artifacts: `train/multi-models/dataset/data.yaml`,
-`train/multi-models/dataset/dataset_report.json` (class names, image counts,
-train instances) and `train/multi-models/config.json` (model, imgsz, classes,
-regions). Add `--no-train` to only rebuild the dataset.
+- `model_vN.pt` – weights for version N, starting at `model_v0.pt`.
+- `model_vN.meta.json` – `version`, relative `weights` path, `classes`, `regions`,
+  `fingerprint` + `fingerprint_entries`, `trained_at`, `base_model`, `params`
+  and `evaluation` (filled in after the post-training evaluation).
+- `model_vN_run/` – Ultralytics run (`results.csv`, `weights/best.pt`, plots).
+- `latest.json` – `{"latest": "model_vN"}` for the newest version.
+- `config.json` – compatibility pointer to the latest version's metadata, read
+  by `evaluate.py`. `multi.pt` / `best.pt` are aliases of the latest weights so
+  `select_models.py` and `python evaluate.py multi` keep working.
+- `dataset/data.yaml` and `dataset/dataset_report.json` – classes, image counts
+  and train instances from the shared 70/15/15 hash split.
 
-If you want to (re)build that combined dataset as a standalone step before
-training, run `python build_dataset_multi.py` from `train/` (optionally with
-`--data`, `--out`, `--val`, `--test`). It uses the same builder as
-`train_multi.py` but performs no training, then prints the output paths and the
-next command (`python train_multi.py`). This is equivalent to the `--no-train`
-path; running `train_multi.py` later rebuilds the dataset and then trains.
+**Before training**, a tkinter popup shows the current dataset summary (class
+count, train/val/test image counts, new and relabeled images versus the latest
+fingerprint), the old model version and an **overfit / no-overfit verdict for
+that old model on the current dataset** computed by `evaluate.py` (shown as
+`n/a` if evaluation fails). The popup lets you change `epochs`, `batch`,
+`imgsz`, `device`, `patience`, `seed` and the starting weights (any old
+`model_vN` or **fresh base**), then press **Train** or **Cancel**. After
+training, a second popup shows mAP50, mAP50-95, precision, recall, F1,
+consistency, verdict and the dataset fingerprint; **OK** closes it.
 
-Both scripts keep the 4:3 portrait letterbox (`rect=True`) by default;
-`--square` disables it. Horizontal flip is disabled automatically when any
-class involves left/right sleeves.
+Headless / scripted runs: add `--cli` (alias `--yes`) to skip both popups; the
+same fields are available as CLI flags (`--epochs`, `--batch`, `--imgsz`,
+`--device`, `--patience`, `--seed`, `--version`, `--fresh`/`--scratch`,
+`--init PATH`, `--square`, `--split`, `--data`, `--out`, `--val`, `--test`,
+`--model`). With no versions yet, the fresh base (`yolo11n.pt` by default)
+produces `model_v0.pt`; otherwise the latest version is selected by default and
+the new run becomes `model_vN+1`. The 4:3 portrait letterbox (`rect=True`) is
+the default; `--square` disables it. Horizontal flip is disabled automatically
+when any left/right sleeve class is present.
+
+The only dataset builder is `python build_dataset.py` (from `train/`). It writes
+`multi-models/dataset/` and exposes `build_multi_dataset` / `SCHEMA_PATH` for
+`train.py`; no YOLO is needed just to rebuild the data. `train.py` also rebuilds
+`dataset/` on every run before training (`--data`, `--out`, `--val`, `--test`
+override the defaults). `prepare_data.py` and `build_dataset_multi.py` have been
+removed — do not call them.
+
+Standalone diagnosis still works: `python evaluate.py` opens a multi-select
+model picker; `python evaluate.py multi`, `--models ...` and `--all` cover the
+scripted paths. It reads `config.json`, the `multi.pt` alias and `dataset/` for
+legacy/versioned models; the trainer calls the same `evaluate.py` functions
+itself. The held-out split is **test** unless `--split val` is given.
 
 ### Dataset split policy
 
-Every dataset split in this project — per-task datasets from `build_dataset.py`, the
-combined dataset built by `train_multi.py`, and the standalone `build_dataset_multi.py`
-helper — uses **70% train / 15% validation / 15% test** by default. Assignment is
-hash-based (SHA-1 of the image stem), so an image never moves between splits when more
-data is added. To override the defaults, pass `--val` / `--test` to any of those three
-scripts: train takes the remaining `100 - val - test` percent and `val + test` must stay
-below 100. The effective percentages are recorded in each `dataset_report.json` under
-`split_percent`.
+Every dataset split in this project — the shared dataset built by
+`build_dataset.py` and reused by `train.py` — uses
+**70% train / 15% validation / 15% test** by default. Assignment is hash-based
+(SHA-1 of the image stem), so an image never moves between splits when more data is
+added. To override the defaults, pass `--val` / `--test` to `train.py` (or
+`build_dataset.py`): train takes the remaining `100 - val - test` percent and
+`val + test` must stay below 100. The effective percentages are recorded in each
+`dataset_report.json` under `split_percent`.
 
 ### What `evaluate.py` reports
 
@@ -186,46 +219,59 @@ below 100. The effective percentages are recorded in each `dataset_report.json` 
   alongside the CSV, while keeping the detailed evaluation curves in the
   `evaluation/` folder.
 
+**Clean report layout:** every report starts with the formula section. The
+selected-model `report.md` then opens with a compact summary table —
+**Model | Split | mAP50 / accuracy | F1 | Consistency | Verdict** — followed by
+one section per model with a per-class table (precision, recall, F1 and, for
+detectors, mAP50 / mAP50-95), reasons, suggestions and data warnings. The console
+prints the same one-line-per-model summary when evaluation finishes. The
+held-out split defaults to **test** (`--split val` overrides it; empty test
+folders fall back to val and are recorded in the JSON).
+
 Outputs: `train/runs/evaluation_selected/report.json` and `report.md`, plus a
-per-task `report_selected.json` inside each `train/runs/<task>/evaluation/`.
+per-model `report_selected.json` inside each `train/runs/<model>/evaluation/`.
 Both reports begin with a formula section documenting every metric used.
+
+### Photo prediction GUI (`predict_image.py`)
+
+`python predict_image.py` (from `train/`) opens a tkinter window. The
+**"Upload picture…"** button is at the top-left; a dropdown lists every trained
+model (individual, versioned and legacy multi) and **"Choose models…"** opens
+the shared `select_models` picker for multi-select. Picking a picture runs the
+selected model(s) immediately: numbered boxes are drawn on the photo and the
+results panel lists each detected class, confidence and the weights that made
+it. The annotated image is saved under `project/predicts/`; no tokens or
+secrets are logged.
+
+Headless mode is unchanged, e.g. `python predict_image.py photo.jpg --weights
+multi-models/multi.pt --conf 0.25 --save out.jpg`.
 
 ---
 
-## Training flow (multi vs individual)
+## Training flow (one versioned multi model)
 
-Both flows start from the same JSON sidecars and use the same hash-based **70% train / 15% val / 15% test** split, but they produce different datasets, checkpoints and `train_batchX` locations. The diagrams below trace each one end to end.
-
-### Multi model (one model for every labeled region)
+One flow only: `python train.py` reads the JSON sidecars, builds the dataset with the
+same hash-based **70% train / 15% val / 15% test** split, reviews the old model,
+then writes a new version.
 
 ```mermaid
 flowchart TD
-    A["1. python train/build_dataset_multi.py (or train_multi.py)"] --> B["2. Read label sidecars data/**/*.json + their images"]
+    A["1. python train.py (from train/; --cli skips popups)"] --> B["2. Read label sidecars data/**/*.json + their images"]
     B --> C["3. Hash split 70% train / 15% val / 15% test (--val 15 --test 15)"]
     C --> D["4. Write train/multi-models/dataset/: images/{train,val,test}/*.jpg, labels/{train,val,test}/*.txt, data.yaml, dataset_report.json"]
-    D --> E["5. Write train/multi-models/config.json"]
-    E --> F["6. python train_multi.py: yolo11n.pt (--model), data=train/multi-models/dataset/data.yaml, project=train/multi-models, name=multi, imgsz 640, rect True (4:3 letterbox ~640x853), fliplr 0.0 if any L/R sleeve class, --batch 16, --epochs 100, --patience 30"]
-    F --> G["7. Ultralytics loads batches from train/multi-models/dataset/images/train + labels/train"]
-    G --> H["8. train_batch0.jpg, train_batch1.jpg, ... saved in train/multi-models/multi/ - debug mosaics = visualize-only copies of batches assembled in RAM from that dataset folder (NOT in the dataset folder)"]
-    H --> I["9. Best checkpoint train/multi-models/multi/weights/best.pt -> copied to train/multi-models/multi.pt (+ best.pt)"]
+    D --> E["5. Fingerprint (relative image path, sha256 of YOLO .txt label) + new/relabeled images vs the latest version"]
+    E --> F["6. Pre-training popup: dataset summary, old version, OLD model overfit verdict from evaluate.py; adjust epochs/batch/imgsz/device/patience/seed/starting weights"]
+    F --> G["7. YOLO train from selected old model or fresh yolo11n.pt: data=train/multi-models/dataset/data.yaml, project=train/multi-models, name=model_vN_run, imgsz 640, rect True (4:3 letterbox ~640x853), fliplr 0.0 if any L/R sleeve class"]
+    G --> H["8. best.pt -> train/multi-models/model_vN.pt; write model_vN.meta.json, latest.json, config.json; update multi.pt alias"]
+    H --> I["9. evaluate.py on the NEW model -> metrics popup (mAP50, mAP50-95, precision, recall, F1, consistency, verdict, fingerprint); evaluation dict saved in model_vN.meta.json"]
 ```
 
-**Where next:** `python train_multi.py` leaves the best weights at `train/multi-models/multi/weights/best.pt`, copied to `train/multi-models/multi.pt` (and `best.pt`). Diagnose the model with `python evaluate.py multi` or `python evaluate.py --all`, then search with the popup picker, which offers both individual and multi models. The `train_batchX.jpg` files in `train/multi-models/multi/` are debugging mosaics only — the real data stays in `train/multi-models/dataset/`, so those files can be ignored or deleted.
-
-### Individual models (old one-per-task flow)
-
-```mermaid
-flowchart TD
-    A["1. python build_dataset.py &lt;task&gt; (or popup)"] --> B["2. Read the same sidecars data/**/*.json + images"]
-    B --> C["3. Same hash split 70% train / 15% val / 15% test"]
-    C --> D["4. Write train/datasets/&lt;task&gt;/: images/{train,val,test}, labels/{train,val,test}/*.txt, data.yaml, dataset_report.json"]
-    D --> E["5. python train_individual.py &lt;task&gt;: model from tasks.yaml (e.g. yolo11n.pt), data=train/datasets/&lt;task&gt;/data.yaml, project=train/runs, name=&lt;task&gt;, rect True, fliplr 0.0 if any class ends _left/_right"]
-    E --> F["6. Ultralytics loads batches from train/datasets/&lt;task&gt;/images/train + labels/train"]
-    F --> G["7. train_batchX.jpg saved in train/runs/&lt;task&gt;/ - debug mosaics = visualize-only copies of RAM batches from that dataset folder (NOT in the dataset folder)"]
-    G --> H["8. Best checkpoint train/runs/&lt;task&gt;/weights/best.pt"]
-```
-
-**Where next:** `python train_individual.py <task>` leaves the best weights at `train/runs/<task>/weights/best.pt`. Diagnose the task with `python evaluate.py <task>` (or `python evaluate.py --models <task>`), then select that individual model in the search popup. The `train_batchX.jpg` files live in `train/runs/<task>/` and are debug mosaics only — training images actually come from `train/datasets/<task>/images/train` + `labels/train`.
+**Where next:** diagnose again any time with `python evaluate.py multi` (or
+`python evaluate.py --all`) from `train/` — `config.json` points at the latest
+version's metadata. The `train_batchX.jpg` files in `train/multi-models/model_vN_run/`
+are debugging mosaics only; the real data stays in `train/multi-models/dataset/`.
+To continue training, simply run `python train.py` again: it picks the latest
+version by default and writes `model_v(N+1)`.
 
 ---
 
@@ -243,7 +289,8 @@ Instead each visual region gets its own box:
 | sleeve_left     | short / long / … |
 | sleeve_right    | short / long / … |
 
-This makes progressive training trivial: a task only looks at the boxes that contain the attribute it cares about.
+This makes progressive training trivial: adding attributes adds new `<region>_<value>`
+classes to the next version of the single model, without invalidating old labels.
 
 Left / right sleeves are **explicitly chosen by the labeler** (never guessed by position), so horizontal flip augmentation is automatically disabled when sleeve side matters.
 
@@ -333,10 +380,14 @@ These are heuristics, not statistical tests; always look at the sample sizes pri
 ## Progressive training workflow
 
 1. Label only the **neck** region on ~200 images.
-2. `python build_dataset.py neck_crew`
-3. `python train_individual.py neck_crew` (or `python train_multi.py` for one all-region model)
-4. `python evaluate.py neck_crew`
-5. If the model is healthy, expand labeling to length, sleeves, etc. and add new tasks in `tasks.yaml`.
+2. `cd train && python train.py` — creates `model_v0.pt` (fresh base) with a
+   dataset summary and an `n/a` old-model report in the pre-training popup.
+3. `python evaluate.py multi` for a standalone diagnosis at any time.
+4. If the model is healthy, expand labeling to length, sleeves, etc. and run
+   `python train.py` again — the popup now shows the old version's overfit
+   verdict and the new/relabeled image counts; the result is `model_v1.pt`.
+5. Repeat: each run continues from the latest version (or your chosen one) and
+   increments the version number.
 
 Because every attribute lives in its own box, adding a new attribute never invalidates old labels.
 
